@@ -20,6 +20,7 @@ npm-debug.log*
 # 운영 상태 파일 (대량/민감)
 state/coverage/
 state/campaigns/*-published.json
+state/campaigns/ingest-report-*.md
 
 # 원본/처리 이미지 (용량 큼)
 assets/raw/
