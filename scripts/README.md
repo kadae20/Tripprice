@@ -69,11 +69,31 @@ npm test
 
 ---
 
+### enrich-missing-data.js
+coverage score 미달 호텔 진단 + 필드별 보강 계획 생성. 크롤링/API 호출 없이 진단·전략 제안만 수행.
+
+```bash
+# threshold 60점 미만 (기본)
+node scripts/enrich-missing-data.js
+
+# threshold 직접 지정
+node scripts/enrich-missing-data.js --threshold=80
+
+# 특정 호텔만 진단
+node scripts/enrich-missing-data.js --hotel=haeundae-no-data
+
+# 전체 호텔 진단
+node scripts/enrich-missing-data.js --all
+```
+
+출력: `state/campaigns/enrichment-report-[date].md`, `state/campaigns/enrichment-plan-[hotel_id].json`
+
+---
+
 ## 예정 스크립트
 
 | 파일명 | 목적 | 담당 Skill |
 |--------|------|-----------|
-| `enrich-missing-data.js` | 커버리지 미달 호텔 보강 전략 실행 | enrich-missing-data |
 | `coverage-report.js` | 전체 호텔 커버리지 현황 요약 출력 | data-engineer |
 | `performance-fetch.js` | Search Console/Analytics 데이터 수집 | performance-analyst |
 
