@@ -1,0 +1,21 @@
+{
+  "name": "tripprice-editorial",
+  "version": "1.0.0",
+  "description": "Tripprice 편집국 자동화 스크립트",
+  "private": true,
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "ingest": "node scripts/ingest-hotel-data.js",
+    "publish": "node scripts/wp-publish.js",
+    "images": "node scripts/process-images.js",
+    "test": "node scripts/test-wp-publish.js && node scripts/test-process-images.js"
+  },
+  "dependencies": {
+    "sharp": "^0.33.0"
+  },
+  "notes": {
+    "sharp": "이미지 리사이즈·WebP 변환·워터마크 처리용. npm install 후 사용 가능."
+  }
+}

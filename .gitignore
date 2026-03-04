@@ -1,0 +1,36 @@
+# Claude Code 로컬 설정 (개인 권한 설정, 커밋 불필요)
+.claude/settings.local.json
+
+# 의존성
+node_modules/
+
+# 환경변수 / 인증정보 (절대 커밋 금지)
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+credentials.json
+service-account.json
+
+# 로그
+*.log
+npm-debug.log*
+
+# 운영 상태 파일 (대량/민감)
+state/coverage/
+state/campaigns/*-published.json
+
+# 원본/처리 이미지 (용량 큼)
+assets/raw/
+assets/processed/
+
+# 호텔 원본 데이터 (개인정보 포함 가능)
+data/hotels/
+data/processed/
+
+# OS / 에디터
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
