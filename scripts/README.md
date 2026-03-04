@@ -90,11 +90,36 @@ node scripts/enrich-missing-data.js --all
 
 ---
 
+### coverage-report.js
+전체 호텔 coverage 상태를 요약. 발행 가능 / 보강 필요 / 발행 제외 현황을 한눈에 출력.
+
+```bash
+# 전체 요약
+node scripts/coverage-report.js
+
+# 상위/하위 10개
+node scripts/coverage-report.js --top=10
+
+# 특정 등급만
+node scripts/coverage-report.js --grade=A
+
+# 액션 필터
+node scripts/coverage-report.js --action=needs-enrichment
+node scripts/coverage-report.js --action=publish-ready
+node scripts/coverage-report.js --action=exclude
+
+# JSON 요약 파일 추가 저장
+node scripts/coverage-report.js --json
+```
+
+출력: `state/campaigns/coverage-report-[date].md`, `state/campaigns/coverage-summary-[date].json` (--json 시)
+
+---
+
 ## 예정 스크립트
 
 | 파일명 | 목적 | 담당 Skill |
 |--------|------|-----------|
-| `coverage-report.js` | 전체 호텔 커버리지 현황 요약 출력 | data-engineer |
 | `performance-fetch.js` | Search Console/Analytics 데이터 수집 | performance-analyst |
 
 ---
