@@ -101,6 +101,55 @@ node scripts/process-images.js --hotel=grand-hyatt-seoul --watermark
 
 ---
 
+### `enrich-missing-data.js` — 데이터 보강 계획 생성
+
+coverage score 미달 호텔을 찾아 누락 필드별 보강 방법과 대체 전략을 제안. 크롤링/API 호출 없이 진단·전략 제안만 수행.
+
+```bash
+# 60점 미만 (기본)
+node scripts/enrich-missing-data.js
+
+# threshold 직접 지정
+node scripts/enrich-missing-data.js --threshold=80
+
+# 특정 호텔만 진단
+node scripts/enrich-missing-data.js --hotel=haeundae-no-data
+
+# 전체 호텔 진단
+node scripts/enrich-missing-data.js --all
+```
+
+출력: `state/campaigns/enrichment-report-[date].md` · `state/campaigns/enrichment-plan-[hotel_id].json`
+
+---
+
+### `coverage-report.js` — Coverage 현황 대시보드
+
+전체 호텔 coverage 상태 요약. 발행 가능 / 보강 필요 / 발행 제외 현황을 한눈에 출력.
+
+```bash
+# 전체 요약
+node scripts/coverage-report.js
+
+# 상위/하위 10개
+node scripts/coverage-report.js --top=10
+
+# 특정 등급만
+node scripts/coverage-report.js --grade=A
+
+# 액션 필터
+node scripts/coverage-report.js --action=publish-ready
+node scripts/coverage-report.js --action=needs-enrichment
+node scripts/coverage-report.js --action=exclude
+
+# JSON 요약 파일 추가 저장
+node scripts/coverage-report.js --json
+```
+
+출력: `state/campaigns/coverage-report-[date].md` · `state/campaigns/coverage-summary-[date].json` (`--json` 시)
+
+---
+
 ### `npm test` — 단위 테스트
 
 WP 서버·sharp 없이 실행 가능. 현재 70개 테스트 (wp-publish 37 + process-images 33).
@@ -122,6 +171,14 @@ npm test
 | `GOOGLE_SC_CREDENTIALS` | Google Search Console 서비스 계정 JSON 경로 |
 
 > `.env` 파일은 절대 커밋하지 마세요. `.gitignore`에 등록되어 있습니다.
+
+---
+
+## 예정 스크립트
+
+| 파일명 | 목적 |
+|--------|------|
+| `performance-fetch.js` | Search Console/Analytics 데이터 수집 |
 
 ---
 
