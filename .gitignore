@@ -26,7 +26,9 @@ assets/raw/
 assets/processed/
 
 # 호텔 원본 데이터 (개인정보 포함 가능)
-data/hotels/
+# sample-hotels.csv는 스키마 레퍼런스용으로 커밋 허용
+data/hotels/*
+!data/hotels/sample-hotels.csv
 data/processed/
 
 # OS / 에디터

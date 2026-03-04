@@ -37,12 +37,13 @@ const REQUIRED_URL_FIELDS = ['source_url', 'partner_url'];
 
 // Coverage score 항목 (총 100점)
 // data-pipeline-quality.md 기준
+// key: v2 정규화 필드명. check 함수에서 v1 필드 폴백 처리.
 const COVERAGE_CRITERIA = [
   {
-    key: 'photos',
+    key: 'photos_count',
     label: '사진 ≥ 5장',
     points: 20,
-    check: (v) => Array.isArray(v) ? v.length >= 5 : (parseInt(v, 10) || 0) >= 5,
+    check: (v) => (parseInt(v, 10) || 0) >= 5,
   },
   {
     key: 'amenities',
@@ -75,13 +76,13 @@ const COVERAGE_CRITERIA = [
     check: (v) => typeof v === 'string' && v.trim().length > 0,
   },
   {
-    key: 'price_range',
+    key: 'price_min',
     label: '가격대 정보',
     points: 10,
     check: (v) => v !== null && v !== undefined && String(v).trim().length > 0,
   },
   {
-    key: 'checkin_info',
+    key: 'checkin_time',
     label: '체크인 정보',
     points: 5,
     check: (v) => typeof v === 'string' && v.trim().length > 0,
@@ -178,15 +179,28 @@ function validateHotel(raw) {
   }
 
   // source_url 또는 partner_url 중 하나 필수
+  // agoda_hotel_id가 있으면 partner_url 자동 생성 가능 → 허용
   const hasUrl = REQUIRED_URL_FIELDS.some(
     (f) => raw[f] && String(raw[f]).trim() !== ''
-  );
+  ) || (raw.agoda_hotel_id && String(raw.agoda_hotel_id).trim() !== '');
   if (!hasUrl) {
-    errors.push(`필수 필드 누락: source_url 또는 partner_url 중 하나 필요`);
+    errors.push(`필수 필드 누락: source_url, partner_url, agoda_hotel_id 중 하나 필요`);
+  }
+
+  // v1 필드 감지 → 경고 (하위 호환 처리됨)
+  if (raw.price_range && String(raw.price_range).trim()) {
+    warnings.push('[v1 호환] price_range 감지 → price_min/price_max로 변환');
+  }
+  if (raw.checkin_info && String(raw.checkin_info).trim()) {
+    warnings.push('[v1 호환] checkin_info 감지 → checkin_time/checkout_time으로 변환');
+  }
+  if (raw.photos && !raw.photos_count) {
+    warnings.push('[v1 호환] photos 감지 → photos_count로 변환');
   }
 
   // 이상값 감지
-  if (raw.price_min && parseFloat(raw.price_min) === 0) {
+  const priceMin = raw.price_min || (raw.price_range ? String(raw.price_range).split(/[-~]/)[0] : '');
+  if (priceMin && parseFloat(priceMin) === 0) {
     warnings.push('price_min이 0 — 가격 데이터 확인 필요');
   }
   if (raw.hotel_name && raw.hotel_name.length < 2) {
@@ -197,53 +211,151 @@ function validateHotel(raw) {
 }
 
 // ──────────────────────────────────────────────
-// 데이터 정규화
+// v1 → v2 필드 하위 호환 파싱 헬퍼
+// ──────────────────────────────────────────────
+
+/**
+ * v1 price_range ("80000-150000" 또는 "8만~15만") → { price_min, price_max }
+ */
+function parsePriceRange(priceRange) {
+  const str = String(priceRange).replace(/[^\d~\-]/g, '');
+  const sep = str.includes('~') ? '~' : '-';
+  const parts = str.split(sep);
+  return {
+    price_min: parts[0] ? parseInt(parts[0], 10) : null,
+    price_max: parts[1] ? parseInt(parts[1], 10) : null,
+  };
+}
+
+/**
+ * v1 checkin_info ("15:00 / 12:00" 또는 "체크인 15:00, 체크아웃 12:00") → { checkin_time, checkout_time }
+ */
+function parseCheckinInfo(checkinInfo) {
+  const timeRe = /(\d{1,2}:\d{2})/g;
+  const matches = String(checkinInfo).match(timeRe) || [];
+  return {
+    checkin_time: matches[0] || '',
+    checkout_time: matches[1] || '',
+  };
+}
+
+// ──────────────────────────────────────────────
+// 데이터 정규화 (v2 기준, v1 하위 호환 포함)
 // ──────────────────────────────────────────────
 function normalizeHotel(raw) {
   const hotelId = raw.hotel_id
     ? String(raw.hotel_id).trim()
     : generateHotelId(raw.hotel_name || '', raw.city || '');
 
-  // amenities: 쉼표 구분 문자열 또는 배열 모두 처리
+  // ── 가격 정보 (v2 우선, v1 폴백) ──────────────
+  let priceMin = raw.price_min ? parseInt(raw.price_min, 10) : null;
+  let priceMax = raw.price_max ? parseInt(raw.price_max, 10) : null;
+  if (!priceMin && raw.price_range && String(raw.price_range).trim()) {
+    const parsed = parsePriceRange(raw.price_range);
+    priceMin = priceMin || parsed.price_min;
+    priceMax = priceMax || parsed.price_max;
+  }
+
+  // ── 체크인/아웃 (v2 우선, v1 폴백) ───────────
+  let checkinTime = (raw.checkin_time || '').trim();
+  let checkoutTime = (raw.checkout_time || '').trim();
+  if (!checkinTime && raw.checkin_info && String(raw.checkin_info).trim()) {
+    const parsed = parseCheckinInfo(raw.checkin_info);
+    checkinTime = parsed.checkin_time;
+    checkoutTime = parsed.checkout_time;
+  }
+
+  // ── 사진 수 (v2 우선, v1 photos 폴백) ─────────
+  let photosCount = raw.photos_count ? parseInt(raw.photos_count, 10) : null;
+  if (!photosCount && raw.photos) {
+    const p = raw.photos;
+    if (typeof p === 'number') photosCount = p;
+    else if (typeof p === 'string' && !isNaN(parseInt(p, 10))) photosCount = parseInt(p, 10);
+    else if (Array.isArray(p)) photosCount = p.length;
+  }
+  photosCount = photosCount || 0;
+
+  // ── amenities: 파이프 구분 문자열 또는 배열 ───
   let amenities = raw.amenities || [];
   if (typeof amenities === 'string') {
     amenities = amenities.split('|').map((s) => s.trim()).filter(Boolean);
   }
 
-  // photos: 숫자(개수) 또는 URL 배열 처리
-  let photos = raw.photos || raw.photos_count || [];
-  if (typeof photos === 'string' && !isNaN(parseInt(photos, 10))) {
-    // 숫자로 주어진 경우 count를 배열 길이로 표현
-    photos = parseInt(photos, 10);
-  } else if (typeof photos === 'string') {
-    photos = photos.split('|').map((s) => s.trim()).filter(Boolean);
-  }
-
-  // room_types: 쉼표/파이프 구분 문자열 처리
+  // ── room_types: 파이프 구분 문자열 처리 ────────
   let roomTypes = raw.room_types || '';
   if (typeof roomTypes === 'string' && roomTypes.trim()) {
     roomTypes = roomTypes.split('|').map((s) => s.trim()).filter(Boolean);
   }
 
+  // ── partner_url: agoda_hotel_id로 자동 생성 ───
+  const agodaId = (raw.agoda_hotel_id || '').trim();
+  const utmCampaign = (raw.utm_campaign || hotelId).trim();
+  let partnerUrl = (raw.partner_url || '').trim();
+  if (!partnerUrl && agodaId) {
+    partnerUrl = `https://www.agoda.com/hotel/${agodaId}?cid=1922720&tag=${utmCampaign}`;
+  }
+
   return {
+    // 기본 식별
     hotel_id: hotelId,
     hotel_name: (raw.hotel_name || '').trim(),
+    hotel_name_en: (raw.hotel_name_en || '').trim(),
     city: (raw.city || '').trim().toLowerCase(),
     country: (raw.country || '').trim().toLowerCase(),
     address: (raw.address || '').trim(),
-    source_url: (raw.source_url || raw.partner_url || '').trim(),
-    partner_url: (raw.partner_url || '').trim(),
-    location_description: (raw.location_description || '').trim(),
-    review_summary: (raw.review_summary || '').trim(),
-    transport_info: (raw.transport_info || '').trim(),
-    price_range: (raw.price_range || raw.price_min || '').trim(),
-    checkin_info: (raw.checkin_info || '').trim(),
-    amenities,
-    photos,
-    room_types: roomTypes,
-    star_rating: raw.star_rating ? parseFloat(raw.star_rating) : null,
+    district: (raw.district || '').trim(),
+
+    // 위치 좌표 및 교통
     latitude: raw.latitude ? parseFloat(raw.latitude) : null,
     longitude: raw.longitude ? parseFloat(raw.longitude) : null,
+    nearest_station: (raw.nearest_station || '').trim(),
+    station_walk_min: raw.station_walk_min ? parseInt(raw.station_walk_min, 10) : null,
+
+    // 호텔 분류
+    star_rating: raw.star_rating ? parseFloat(raw.star_rating) : null,
+    hotel_category: (raw.hotel_category || '').trim(),
+    target_persona: raw.target_persona
+      ? String(raw.target_persona).split('|').map((s) => s.trim()).filter(Boolean)
+      : [],
+
+    // 가격
+    price_min: priceMin,
+    price_max: priceMax,
+    currency: (raw.currency || 'KRW').trim(),
+
+    // 체크인/아웃
+    checkin_time: checkinTime,
+    checkout_time: checkoutTime,
+
+    // 시설
+    amenities,
+    room_types: roomTypes,
+
+    // 사진
+    photos_count: photosCount,
+    photo_source: (raw.photo_source || '').trim(),
+
+    // 콘텐츠
+    location_description: (raw.location_description || '').trim(),
+    transport_info: (raw.transport_info || '').trim(),
+    review_summary: (raw.review_summary || '').trim(),
+    review_score: raw.review_score ? parseFloat(raw.review_score) : null,
+    review_count: raw.review_count ? parseInt(raw.review_count, 10) : null,
+
+    // 제휴
+    agoda_hotel_id: agodaId,
+    partner_url: partnerUrl,
+    utm_campaign: utmCampaign,
+    source_url: (raw.source_url || partnerUrl).trim(),
+
+    // 운영
+    publish_status: (raw.publish_status || 'pending').trim(),
+    content_priority: (raw.content_priority || 'normal').trim(),
+    data_source: (raw.data_source || '').trim(),
+    data_fetched_at: (raw.data_fetched_at || '').trim(),
+    notes: (raw.notes || '').trim(),
+
+    // 적재 메타
     ingested_at: new Date().toISOString(),
     source_file: raw._source_file || '',
   };
