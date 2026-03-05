@@ -163,6 +163,7 @@ if (require.main === module) {
     } catch { return null; }
   }
 
+  const SITE_URL = (process.env.SITE_URL || process.env.WP_URL || 'https://tripprice.net').replace(/\/$/, '');
   const slug           = fm.slug || path.basename(draftPath, '.md').replace(/^draft-/, '').replace(/-\d{4}-\d{2}-\d{2}$/, '');
   const affiliateLinks = extractAffiliateLinks(raw);
   const internalLinks  = extractInternalLinks(raw);
@@ -181,12 +182,12 @@ if (require.main === module) {
 
     meta: {
       meta_description: fm.meta_description || '',
-      canonical_url:    `https://tripprice.com/${fm.lang || 'ko'}/${slug}/`,
+      canonical_url:    `${SITE_URL}/${fm.lang || 'ko'}/${slug}/`,
     },
 
     hreflang_links: ['ko', 'en', 'ja', 'x-default'].map(l => ({
       lang: l,
-      url:  `https://tripprice.com/${l === 'x-default' ? 'ko' : l}/${slug}/`,
+      url:  `${SITE_URL}/${l === 'x-default' ? 'ko' : l}/${slug}/`,
     })),
 
     content_markdown: body,
@@ -282,6 +283,6 @@ if (require.main === module) {
   }
 
   console.log('\n다음 단계:');
-  console.log(`  WP_URL=https://tripprice.com WP_USER=admin WP_APP_PASS="xxxx xxxx" \\`);
+  console.log(`  WP_URL=${SITE_URL} WP_USER=admin WP_APP_PASS="xxxx xxxx" \\`);
   console.log(`    node scripts/wp-publish.js wordpress/drafts/${outFilename}`);
 }

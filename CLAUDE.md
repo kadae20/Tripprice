@@ -20,6 +20,13 @@
 ## 명령어
 
 ```bash
+# 콘텐츠 파이프라인 전체 (안전 모드: build-wp-post까지)
+node scripts/pipeline.js --hotels=grand-hyatt-seoul,lotte-hotel-seoul
+
+# 파이프라인 + WP 발행
+WP_URL=https://tripprice.net WP_USER=admin WP_APP_PASS="xxxx xxxx" \
+  node scripts/pipeline.js --hotels=grand-hyatt-seoul --publish
+
 # 호텔 데이터 적재
 node scripts/ingest-hotel-data.js data/hotels/[file].csv
 
@@ -27,14 +34,18 @@ node scripts/ingest-hotel-data.js data/hotels/[file].csv
 node scripts/process-images.js --hotel=[hotel_id] --dry-run
 node scripts/process-images.js --hotel=[hotel_id]
 
-# WordPress Draft 발행
-WP_URL=https://tripprice.com WP_USER=admin WP_APP_PASS="xxxx xxxx" \
-  node scripts/wp-publish.js wordpress/[post].json
+# WordPress Draft 수동 발행
+WP_URL=https://tripprice.net WP_USER=admin WP_APP_PASS="xxxx xxxx" \
+  node scripts/wp-publish.js wordpress/drafts/[post].json
+
+# 시크릿 감사
+node scripts/secrets-audit.js
 
 # 테스트
 npm test
 ```
 
+> 환경변수 설정: .env.example → .env.local 복사 후 값 입력
 > 상세 옵션 및 예시: scripts/README.md
 
 ## 아키텍처 요약
@@ -52,6 +63,8 @@ npm test
 | `.claude/agents/` | 역할 분업, 최소 권한 |
 | `.claude/hooks/` | 훅 정책 문서 + 실행 스크립트 |
 | `content-templates/` | 콘텐츠 구조 템플릿 |
+| `docs/` | 배포·운영 문서 |
+| `lib/` | 공유 유틸리티 (agoda 링크·API) |
 | `wordpress/` | WP 발행 스키마 |
 | `data/` | 호텔 원본 데이터 |
 | `assets/` | 이미지 (raw/processed) |

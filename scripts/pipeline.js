@@ -145,7 +145,8 @@ if (!doPublish) {
   console.log('');
   console.log('  사람 검토 후 발행:');
   if (postFile) {
-    console.log(`  WP_URL=https://tripprice.com WP_USER=admin WP_APP_PASS="xxxx xxxx" \\`);
+    const wpUrl = process.env.WP_URL || 'https://tripprice.net';
+    console.log(`  WP_URL=${wpUrl} WP_USER=admin WP_APP_PASS="xxxx xxxx" \\`);
     console.log(`    node scripts/wp-publish.js wordpress/drafts/${postFile}`);
   }
   console.log('');
