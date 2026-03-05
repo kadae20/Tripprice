@@ -25,7 +25,7 @@ node scripts/ingest-hotel-data.js
 WordPress REST API 기반 Draft 발행. publish 상태 차단.
 
 ```bash
-WP_URL=https://tripprice.com \
+WP_URL=https://tripprice.net \
 WP_USER=admin \
 WP_APP_PASS="xxxx xxxx xxxx xxxx" \
   node scripts/wp-publish.js wordpress/sample-post.json
@@ -245,7 +245,7 @@ node scripts/build-wp-post.js --draft=draft-seoul-luxury-comparison-2026-03-05 -
 ## 환경변수
 
 ```bash
-WP_URL=https://tripprice.com
+WP_URL=https://tripprice.net
 WP_USER=your_username
 WP_APP_PASS="xxxx xxxx xxxx xxxx"   # WP Application Password
 AGODA_API_KEY=...

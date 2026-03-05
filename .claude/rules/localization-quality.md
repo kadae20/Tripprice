@@ -22,10 +22,10 @@
 모든 다국어 글은 반드시 hreflang 태그 포함:
 
 ```html
-<link rel="alternate" hreflang="ko" href="https://tripprice.com/ko/[slug]" />
-<link rel="alternate" hreflang="en" href="https://tripprice.com/en/[slug]" />
-<link rel="alternate" hreflang="ja" href="https://tripprice.com/ja/[slug]" />
-<link rel="alternate" hreflang="x-default" href="https://tripprice.com/ko/[slug]" />
+<link rel="alternate" hreflang="ko" href="https://tripprice.net/ko/[slug]" />
+<link rel="alternate" hreflang="en" href="https://tripprice.net/en/[slug]" />
+<link rel="alternate" hreflang="ja" href="https://tripprice.net/ja/[slug]" />
+<link rel="alternate" hreflang="x-default" href="https://tripprice.net/ko/[slug]" />
 ```
 
 ## canonical 규칙

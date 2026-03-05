@@ -10,7 +10,7 @@
  *     node scripts/wp-publish.js wordpress/sample-post.json
  *
  * 필수 환경변수:
- *   WP_URL      — 워드프레스 사이트 URL (예: https://tripprice.com)
+ *   WP_URL      — 워드프레스 사이트 URL (예: https://tripprice.net)
  *   WP_USER     — WordPress 사용자명
  *   WP_APP_PASS — WordPress Application Password (대시/공백 포함 그대로)
  *
@@ -57,7 +57,7 @@ function loadEnv() {
     console.error(
       `[오류] 환경변수 누락: ${missing.join(', ')}\n\n` +
       `  실행 예시:\n` +
-      `  WP_URL=https://tripprice.com \\\n` +
+      `  WP_URL=https://tripprice.net \\\n` +
       `  WP_USER=admin \\\n` +
       `  WP_APP_PASS="xxxx xxxx xxxx xxxx" \\\n` +
       `    node scripts/wp-publish.js wordpress/sample-post.json\n`
@@ -460,7 +460,7 @@ async function main() {
       '사용법:\n' +
       '  node scripts/wp-publish.js [JSON 파일 경로]\n\n' +
       '예시:\n' +
-      '  WP_URL=https://tripprice.com WP_USER=admin WP_APP_PASS="xxxx xxxx" \\\n' +
+      '  WP_URL=https://tripprice.net WP_USER=admin WP_APP_PASS="xxxx xxxx" \\\n' +
       '    node scripts/wp-publish.js wordpress/sample-post.json'
     );
     process.exit(1);

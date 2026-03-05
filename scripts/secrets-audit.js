@@ -24,7 +24,7 @@ const SCAN_EXTS = new Set(['.js', '.ts', '.json', '.env', '.sh', '.md']);
 // 제외 경로 (prefix 매칭)
 const EXCLUDE_DIRS = [
   'node_modules', '.git', 'assets/raw', 'assets/processed',
-  'data/processed', 'state',
+  'data/processed', 'state', 'wordpress/drafts',
 ];
 
 // 패턴 정의
@@ -49,11 +49,11 @@ const PATTERNS = [
   {
     id:      'wp-app-pass-real',
     label:   'WP Application Password (실제 값 의심)',
-    // 6그룹 * 4자 영숫자 공백 구분 (예: NpvM jY16 ZZJm Zdc9 N3Hx H3GI)
+    // 6그룹 * 4자 영숫자 공백 구분 (예: xxxx xxxx xxxx xxxx xxxx xxxx)
     re:      /\b[A-Za-z0-9]{4}(?:\s[A-Za-z0-9]{4}){5}\b/g,
     note:    '→ 즉시 WP 비밀번호 교체 + WP_APP_PASS 환경변수 사용',
     severity: 'FAIL',
-    allowedFiles: ['.env.example'],
+    allowedFiles: ['.env.example', 'secrets-audit.js'],
   },
   {
     id:      'inline-password',

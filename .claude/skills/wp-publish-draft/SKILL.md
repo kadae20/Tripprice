@@ -14,7 +14,7 @@
 
 ## 필수 환경변수 (파일 저장 금지)
 ```
-WP_SITE_URL     # 예: https://tripprice.com
+WP_SITE_URL     # 예: https://tripprice.net
 WP_USERNAME     # WP 계정명
 WP_APP_PASSWORD # WP Application Password (대시 포함)
 ```
@@ -40,7 +40,7 @@ state/campaigns/[slug]-published.json
 {
   "post_id": 1234,
   "status": "draft",
-  "edit_url": "https://tripprice.com/wp-admin/post.php?post=1234&action=edit",
+  "edit_url": "https://tripprice.net/wp-admin/post.php?post=1234&action=edit",
   "published_at": "2025-01-01T00:00:00Z"
 }
 ```
