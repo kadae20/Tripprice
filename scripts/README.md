@@ -116,6 +116,34 @@ node scripts/coverage-report.js --json
 
 ---
 
+### agoda-search.js
+아고다 CID 포함 링크 생성 + 로컬 호텔 데이터 검색.
+Content API(`--api`)는 tripprice.net 서버 배포 후 사용 가능 (도메인 제한).
+
+```bash
+# 도시로 검색 + CID 링크 생성
+node scripts/agoda-search.js --city=서울
+
+# 키워드 검색
+node scripts/agoda-search.js --keyword=롯데
+
+# 특정 호텔 ID
+node scripts/agoda-search.js --hotel-id=grand-hyatt-seoul
+
+# 전체 호텔 목록
+node scripts/agoda-search.js --all
+
+# JSON 저장
+node scripts/agoda-search.js --city=서울 --json
+
+# Content API 모드 (서버 배포 후)
+AGODA_API_KEY="1926938:xxxx" node scripts/agoda-search.js --city=서울 --api
+```
+
+환경변수: `AGODA_CID` (기본 1926938), `AGODA_API_KEY` (서버 전용)
+
+---
+
 ### pipeline.js
 콘텐츠 파이프라인 전체 실행 래퍼. 기본은 build-wp-post까지(안전 모드), `--publish`시 wp-publish까지.
 

@@ -71,8 +71,8 @@ test('값에 콜론 포함된 경우 첫 번째 콜론만 구분자', () => {
 console.log('\n[2] extractAffiliateLinks\n');
 
 const sampleMd = `
-> **[그랜드 하얏트 서울 현재 가격 확인하기 →](https://www.agoda.com/hotel/535922?cid=1922720&tag=grand-hyatt-seoul)**
-> **[롯데호텔 서울 현재 가격 확인하기 →](https://www.agoda.com/hotel/68689?cid=1922720&tag=lotte-hotel-seoul)**
+> **[그랜드 하얏트 서울 현재 가격 확인하기 →](https://www.agoda.com/hotel/535922?cid=1926938&tag=grand-hyatt-seoul)**
+> **[롯데호텔 서울 현재 가격 확인하기 →](https://www.agoda.com/hotel/68689?cid=1926938&tag=lotte-hotel-seoul)**
 `;
 
 test('CTA 링크 2개 추출', () => {

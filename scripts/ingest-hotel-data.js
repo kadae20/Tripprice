@@ -292,7 +292,8 @@ function normalizeHotel(raw) {
   const utmCampaign = (raw.utm_campaign || hotelId).trim();
   let partnerUrl = (raw.partner_url || '').trim();
   if (!partnerUrl && agodaId) {
-    partnerUrl = `https://www.agoda.com/hotel/${agodaId}?cid=1922720&tag=${utmCampaign}`;
+    const cid = process.env.AGODA_CID || '1926938';
+    partnerUrl = `https://www.agoda.com/hotel/${agodaId}?cid=${cid}&tag=${utmCampaign}`;
   }
 
   return {
