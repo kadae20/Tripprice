@@ -32,6 +32,9 @@ data/hotels/*
 !data/hotels/sample-hotels.csv
 data/processed/
 
+# 자동 생성 콘텐츠 초안 (파이프라인 출력물 — 커밋 불필요)
+wordpress/drafts/
+
 # OS / 에디터
 .DS_Store
 Thumbs.db

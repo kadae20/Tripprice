@@ -10,7 +10,7 @@
     "ingest": "node scripts/ingest-hotel-data.js",
     "publish": "node scripts/wp-publish.js",
     "images": "node scripts/process-images.js",
-    "test": "node scripts/test-wp-publish.js && node scripts/test-process-images.js"
+    "test": "node scripts/test-wp-publish.js && node scripts/test-process-images.js && node scripts/test-build-wp-post.js"
   },
   "dependencies": {
     "sharp": "^0.33.0"

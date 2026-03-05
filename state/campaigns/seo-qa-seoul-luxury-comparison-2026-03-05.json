@@ -1,0 +1,110 @@
+{
+  "draft": "draft-seoul-luxury-comparison-2026-03-05.md",
+  "slug": "seoul-luxury-comparison",
+  "date": "2026-03-05",
+  "publishable": true,
+  "counts": {
+    "PASS": 14,
+    "WARN": 2,
+    "FAIL": 0,
+    "SKIP": 0
+  },
+  "results": [
+    {
+      "id": "title-exists",
+      "label": "SEO title 존재",
+      "status": "PASS",
+      "message": "\"서울 럭셔리 호텔 비교 추천\""
+    },
+    {
+      "id": "title-length",
+      "label": "SEO title 길이 (≤60자)",
+      "status": "WARN",
+      "message": "15자 — 너무 짧을 수 있습니다"
+    },
+    {
+      "id": "slug-exists",
+      "label": "slug 존재",
+      "status": "PASS",
+      "message": "\"seoul-luxury-comparison\""
+    },
+    {
+      "id": "slug-format",
+      "label": "slug 형식 (소문자-하이픈)",
+      "status": "PASS",
+      "message": "3단어"
+    },
+    {
+      "id": "meta-exists",
+      "label": "meta_description 존재",
+      "status": "PASS",
+      "message": "존재"
+    },
+    {
+      "id": "meta-length",
+      "label": "meta_description 길이 (120~155자)",
+      "status": "WARN",
+      "message": "58자 — 120자 이상 권장"
+    },
+    {
+      "id": "h1-count",
+      "label": "H1 정확히 1개",
+      "status": "PASS",
+      "message": "1개"
+    },
+    {
+      "id": "h2-count",
+      "label": "H2 최소 3개",
+      "status": "PASS",
+      "message": "8개"
+    },
+    {
+      "id": "section-target-reader",
+      "label": "\"이 글이 필요한 사람\" 섹션",
+      "status": "PASS",
+      "message": "존재"
+    },
+    {
+      "id": "section-criteria",
+      "label": "\"선택 기준\" 섹션",
+      "status": "PASS",
+      "message": "존재"
+    },
+    {
+      "id": "section-faq",
+      "label": "FAQ 섹션",
+      "status": "PASS",
+      "message": "3개 항목"
+    },
+    {
+      "id": "cta-exists",
+      "label": "CTA 존재 (≥1, ≤4개)",
+      "status": "PASS",
+      "message": "2개"
+    },
+    {
+      "id": "internal-links",
+      "label": "내부 링크 제안 (≥2개)",
+      "status": "PASS",
+      "message": "3개"
+    },
+    {
+      "id": "price-notice",
+      "label": "가격 변동 고지 문구",
+      "status": "PASS",
+      "message": "존재"
+    },
+    {
+      "id": "affiliate-notice",
+      "label": "제휴 링크 고지 문구",
+      "status": "PASS",
+      "message": "존재"
+    },
+    {
+      "id": "lang-declared",
+      "label": "lang 필드 선언",
+      "status": "PASS",
+      "message": "ko"
+    }
+  ]
+}

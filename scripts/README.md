@@ -116,11 +116,95 @@ node scripts/coverage-report.js --json
 
 ---
 
+### pipeline.js
+콘텐츠 파이프라인 전체 실행 래퍼. 기본은 build-wp-post까지(안전 모드), `--publish`시 wp-publish까지.
+
+```bash
+# 안전 모드 (기본) — build-brief → generate-draft → seo-qa → build-wp-post
+node scripts/pipeline.js --hotels=grand-hyatt-seoul,lotte-hotel-seoul
+
+# 언어 지정
+node scripts/pipeline.js --hotels=grand-hyatt-seoul --lang=en
+
+# 전체 발행 (WP 환경변수 필요)
+node scripts/pipeline.js --hotels=grand-hyatt-seoul,lotte-hotel-seoul --publish
+```
+
+FAIL이 있으면 해당 단계에서 즉시 중단 (exit 1).
+
+---
+
+### generate-draft.js
+브리프 JSON → hotel-decision-guide.md 구조 기반 마크다운 초안 생성.
+
+```bash
+node scripts/generate-draft.js --brief=brief-seoul-luxury-comparison-2026-03-05
+node scripts/generate-draft.js --brief=brief-grand-hyatt-seoul-2026-03-05 --lang=en
+```
+
+출력: `wordpress/drafts/draft-[slug]-[date].md`
+
+---
+
+### build-brief.js
+호텔 processed 데이터 + coverage score 읽어 콘텐츠 브리프 JSON 생성.
+coverage_score < 60이면 조기 차단.
+
+```bash
+# 비교 가이드 (복수 호텔)
+node scripts/build-brief.js --hotels=grand-hyatt-seoul,lotte-hotel-seoul
+
+# 단독 리뷰
+node scripts/build-brief.js --hotels=grand-hyatt-seoul
+
+# 언어 지정 (기본 ko)
+node scripts/build-brief.js --hotels=grand-hyatt-seoul --lang=en
+```
+
+출력: `wordpress/drafts/brief-[slug]-[date].json`
+
+---
+
+### seo-qa.js
+마크다운 초안의 SEO·발행 품질 자동 점검 (16개 항목). FAIL 시 exit 1.
+
+```bash
+# 기본 점검
+node scripts/seo-qa.js --draft=draft-seoul-luxury-comparison-2026-03-05
+
+# JSON 요약 함께 저장
+node scripts/seo-qa.js --draft=draft-seoul-luxury-comparison-2026-03-05 --json
+```
+
+점검 항목: SEO title / slug / meta_description / H1·H2 구조 / 필수 섹션 5종 / CTA / 내부 링크 / 가격·제휴 고지 / lang
+
+출력: `state/campaigns/seo-qa-[slug]-[date].md` (+ `--json` 시 `.json`)
+
+---
+
+### build-wp-post.js
+마크다운 초안 → wp-post-schema.json 준수 발행 번들 JSON 생성. wp-publish.js에 바로 전달 가능.
+
+```bash
+# 기본 (content_markdown 포함)
+node scripts/build-wp-post.js --draft=draft-seoul-luxury-comparison-2026-03-05
+
+# HTML 변환 포함
+node scripts/build-wp-post.js --draft=draft-seoul-luxury-comparison-2026-03-05 --html
+```
+
+자동 추출: affiliate_links / internal_links / FAQ schema_markup / coverage_score (brief 참조)
+필수 필드(post_title·slug·post_status·lang) 누락 시 exit 1. post_status는 항상 draft 강제.
+
+출력: `wordpress/drafts/post-[slug]-[date].json`
+
+---
+
 ## 예정 스크립트
 
-| 파일명 | 목적 | 담당 Skill |
-|--------|------|-----------|
-| `performance-fetch.js` | Search Console/Analytics 데이터 수집 | performance-analyst |
+| 파일명 | 목적 |
+|--------|------|
+| `performance-fetch.js` | Search Console/Analytics 데이터 수집 |
 
 ---
 

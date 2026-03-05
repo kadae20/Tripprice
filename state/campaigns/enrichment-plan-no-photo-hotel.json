@@ -1,0 +1,100 @@
+{
+  "hotel_id": "no-photo-hotel",
+  "hotel_name": "데이터부족호텔",
+  "current_score": 20,
+  "grade": "D",
+  "potential_score": 100,
+  "recommendation": {
+    "label": "발행 제외 — 데이터 보강 후 재검토",
+    "description": "현재 발행 불가. enrich-missing-data 재실행 후 재평가 필요.",
+    "key": "exclude"
+  },
+  "gaps": [
+    {
+      "key": "photos",
+      "label": "사진 ≥ 5장",
+      "points": 20,
+      "strategies": [
+        {
+          "label": "수동 조사",
+          "method": "직접 데이터 수집 필요"
+        }
+      ]
+    },
+    {
+      "key": "amenities",
+      "label": "어메니티 ≥ 10개",
+      "points": 15,
+      "strategies": [
+        {
+          "key": "source_url",
+          "label": "공식 사이트",
+          "method": "호텔 공식 페이지 시설 섹션 수동 확인"
+        },
+        {
+          "key": "fallback",
+          "label": "수동 조사",
+          "method": "Booking.com / TripAdvisor 시설 항목 참조 후 팩트체크"
+        }
+      ]
+    },
+    {
+      "key": "location_description",
+      "label": "위치 설명",
+      "points": 15,
+      "strategies": [
+        {
+          "key": "source_url",
+          "label": "공식 사이트",
+          "method": "호텔 About/Location 페이지 참조 후 편집 작성"
+        },
+        {
+          "key": "fallback",
+          "label": "수동 작성",
+          "method": "위도/경도 기반 Google Maps 확인 → \"[랜드마크] 인근, [역명] 도보 N분\" 형식으로 작성"
+        }
+      ]
+    },
+    {
+      "key": "review_summary",
+      "label": "후기 요약",
+      "points": 15,
+      "strategies": [
+        {
+          "key": "fallback",
+          "label": "수동 조사",
+          "method": "Google/TripAdvisor 최근 리뷰 3~5개 분석 → 장단점 요약 (팩트체크 필수)"
+        }
+      ]
+    },
+    {
+      "key": "price_range",
+      "label": "가격대 정보",
+      "points": 10,
+      "strategies": [
+        {
+          "label": "수동 조사",
+          "method": "직접 데이터 수집 필요"
+        }
+      ]
+    },
+    {
+      "key": "checkin_info",
+      "label": "체크인 정보",
+      "points": 5,
+      "strategies": [
+        {
+          "label": "수동 조사",
+          "method": "직접 데이터 수집 필요"
+        }
+      ]
+    }
+  ],
+  "meta": {
+    "has_agoda_id": false,
+    "has_source_url": true,
+    "agoda_hotel_id": null,
+    "publish_status": "unknown",
+    "analyzed_at": "2026-03-04T15:50:38.692Z"
+  }
+}
