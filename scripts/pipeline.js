@@ -39,10 +39,11 @@ if (!args.hotels) {
   process.exit(1);
 }
 
-const lang      = args.lang || 'ko';
-const doPublish = args.publish === true;
-const withHtml  = args.html   === true;
-const today     = new Date().toISOString().split('T')[0];
+const lang       = args.lang || 'ko';
+const doPublish  = args.publish === true;
+const withHtml   = args.html    === true;
+const skipImages = args['no-images'] === true;  // --no-images 로 이미지 스텝 건너뜀
+const today      = new Date().toISOString().split('T')[0];
 
 // ── 실행 헬퍼 ─────────────────────────────────────────────────────────────────
 function run(label, scriptName, scriptArgs) {
@@ -113,6 +114,81 @@ if (!draftFile) {
   process.exit(1);
 }
 const draftId = draftFile.replace('.md', '');
+
+// ── STEP 2.3: 이미지 수집 (fetch → download → process, 기본 ON) ─────────────
+// 실패해도 항상 계속 (모든 스텝 exit(0) 보장).
+// API 키 없거나 도메인 미승인(로컬) → URL 0개 → SVG 카드 폴백.
+if (!skipImages) {
+  const hotelList      = args.hotels.split(',').map(h => h.trim()).filter(Boolean);
+  const watermarkFlag  = args.watermark ? ['--watermark'] : [];
+  const stepLabel      = doPublish ? '5' : '4';
+
+  console.log(`\n${'─'.repeat(60)}`);
+  console.log(`▶  STEP 2.3/${stepLabel}  이미지 자동 수집`);
+  console.log(`   hotels: ${hotelList.join(', ')}`);
+  console.log('─'.repeat(60));
+
+  for (const hotelId of hotelList) {
+    // fetch-hotel-images (Agoda Content API → cache/urls.json)
+    try {
+      const out = execFileSync(NODE, [
+        path.join(SCRIPTS, 'fetch-hotel-images.js'),
+        `--hotel=${hotelId}`,
+      ], { cwd: ROOT, env: process.env, encoding: 'utf8' });
+      process.stdout.write(out);
+    } catch (err) {
+      process.stdout.write(err.stdout || '');
+      console.log(`  ⚠  [fetch-hotel-images:${hotelId}] 실패 — 건너뜀`);
+    }
+
+    // download-images (cache/urls.json → assets/raw/{hotel}/)
+    try {
+      const out = execFileSync(NODE, [
+        path.join(SCRIPTS, 'download-images.js'),
+        `--hotel=${hotelId}`,
+      ], { cwd: ROOT, env: process.env, encoding: 'utf8' });
+      process.stdout.write(out);
+    } catch (err) {
+      process.stdout.write(err.stdout || '');
+      console.log(`  ⚠  [download-images:${hotelId}] 실패 — 건너뜀`);
+    }
+
+    // process-images (assets/raw/{hotel}/ → assets/processed/{hotel}/)
+    // exit(1)이어도 파이프라인 계속 (sharp 미설치 / 이미지 없음 포함)
+    try {
+      const out = execFileSync(NODE, [
+        path.join(SCRIPTS, 'process-images.js'),
+        `--hotel=${hotelId}`,
+        ...watermarkFlag,
+      ], { cwd: ROOT, env: process.env, encoding: 'utf8' });
+      process.stdout.write(out);
+    } catch (err) {
+      process.stdout.write(err.stdout || '');
+      console.log(`  ⚠  [process-images:${hotelId}] — 건너뜀`);
+    }
+  }
+}
+
+// ── STEP 2.5: make-post-image (기본 ON, --no-images 로 건너뜀) ────────────────
+// 실패해도 파이프라인 계속 (make-post-image.js가 항상 exit(0)을 보장)
+if (!skipImages) {
+  const imgLabel = doPublish ? 'STEP 2.5/5  make-post-image' : 'STEP 2.5/4  make-post-image';
+  const watermarkFlag = args.watermark ? ['--watermark'] : [];
+  try {
+    const imgOut = execFileSync(NODE, [
+      path.join(SCRIPTS, 'make-post-image.js'),
+      `--brief=${briefId}`,
+      `--lang=${lang}`,
+      ...watermarkFlag,
+    ], { cwd: ROOT, env: process.env, encoding: 'utf8' });
+    const line = '─'.repeat(60);
+    console.log(`\n${line}\n▶  ${imgLabel}\n${line}`);
+    process.stdout.write(imgOut);
+  } catch (err) {
+    console.log(`\n⚠  [make-post-image] 실패 — featured_media 없이 계속`);
+    process.stdout.write(err.stdout || '');
+  }
+}
 
 // ── STEP 3: seo-qa ────────────────────────────────────────────────────────────
 run(
