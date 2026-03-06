@@ -22,9 +22,12 @@ state/coverage/
 state/campaigns/*-published.json
 state/campaigns/ingest-report-*.md
 
-# 원본/처리 이미지 (용량 큼)
+# 원본/처리 이미지 (용량 큼, 서버에서 다운로드 → 서버에서 wp-publish)
 assets/raw/
 assets/processed/
+
+# 이미지 URL 캐시 + 다운로드 원본 (서버 로컬 전용, git 이동 금지)
+cache/
 
 # 호텔 원본 데이터 (개인정보 포함 가능)
 # sample-hotels.csv는 스키마 레퍼런스용으로 커밋 허용

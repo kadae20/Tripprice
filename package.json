@@ -7,10 +7,12 @@
     "node": ">=18.0.0"
   },
   "scripts": {
-    "ingest": "node scripts/ingest-hotel-data.js",
-    "publish": "node scripts/wp-publish.js",
-    "images": "node scripts/process-images.js",
-    "test": "node scripts/test-wp-publish.js && node scripts/test-process-images.js && node scripts/test-build-wp-post.js"
+    "ingest":    "node scripts/ingest-hotel-data.js",
+    "publish":   "node scripts/_run-with-env.js scripts/wp-publish.js",
+    "pipeline":  "node scripts/_run-with-env.js scripts/pipeline.js",
+    "taxonomy":  "node scripts/_run-with-env.js scripts/_fetch-wp-taxonomy.js",
+    "images":    "node scripts/process-images.js",
+    "test":      "node scripts/test-wp-publish.js && node scripts/test-process-images.js && node scripts/test-build-wp-post.js && node scripts/test-fetch-download.js"
   },
   "dependencies": {
     "sharp": "^0.33.0"
