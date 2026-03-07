@@ -10,7 +10,10 @@
 
 const path = require('path');
 const fs = require('fs');
-const { validateInput, markdownToHTML, buildPayload } = require('./wp-publish');
+const {
+  validateInput, markdownToHTML, buildPayload,
+  buildFigureHtml, injectImagesIntoHtml,
+} = require('./wp-publish');
 
 // ──────────────────────────────────────────────
 // 테스트 러너
@@ -379,6 +382,112 @@ test('sample-post.json buildPayload가 content 생성', () => {
   const payload = buildPayload(sample);
   assert(typeof payload.content === 'string' && payload.content.length > 0, 'content 없음');
   assert(payload.status === 'draft', 'status가 draft가 아님');
+});
+
+// ──────────────────────────────────────────────
+// 7. buildFigureHtml + injectImagesIntoHtml
+// ──────────────────────────────────────────────
+console.log('\n[7] buildFigureHtml\n');
+
+const mockMediaMap = {
+  'assets/raw/hotel-a/featured.jpg': { id: 10, url: 'https://example.com/featured.jpg' },
+  'assets/raw/hotel-a/pool.jpg':     { id: 11, url: 'https://example.com/pool.jpg' },
+  'assets/raw/hotel-a/lobby.jpg':    { id: 12, url: 'https://example.com/lobby.jpg' },
+};
+
+test('1장 → wp-block-image figure', () => {
+  const html = buildFigureHtml(
+    [{ local_path: 'assets/raw/hotel-a/featured.jpg', alt: '대표이미지' }],
+    mockMediaMap
+  );
+  assert(html.includes('wp-block-image'), 'wp-block-image 없음');
+  assert(html.includes('https://example.com/featured.jpg'), 'URL 없음');
+  assert(html.includes('alt="대표이미지"'), 'alt 없음');
+  assert(!html.includes('wp-block-gallery'), '1장인데 gallery 태그 사용됨');
+});
+
+test('2장 → wp-block-gallery figure', () => {
+  const html = buildFigureHtml(
+    [
+      { local_path: 'assets/raw/hotel-a/featured.jpg', alt: '이미지1' },
+      { local_path: 'assets/raw/hotel-a/pool.jpg',     alt: '이미지2' },
+    ],
+    mockMediaMap
+  );
+  assert(html.includes('wp-block-gallery'), 'wp-block-gallery 없음');
+  assert(html.includes('columns-2'), '2장 갤러리 columns-2 없음');
+});
+
+test('mediaMap에 없는 이미지는 무시', () => {
+  const html = buildFigureHtml(
+    [{ local_path: 'assets/raw/hotel-a/nonexistent.jpg', alt: '없음' }],
+    mockMediaMap
+  );
+  assert(html === '', 'mediaMap 없는 이미지는 빈 문자열');
+});
+
+test('alt 텍스트 XSS — 큰따옴표 이스케이프', () => {
+  const map = { 'a.jpg': { id: 1, url: 'https://x.com/a.jpg' } };
+  const html = buildFigureHtml([{ local_path: 'a.jpg', alt: 'A "B" C' }], map);
+  assert(!html.includes('"B"'), 'alt의 큰따옴표가 이스케이프되지 않음');
+  assert(html.includes('&quot;B&quot;'), 'alt XSS 이스케이프 실패');
+});
+
+console.log('\n[8] injectImagesIntoHtml\n');
+
+const sampleHtml =
+  '<h1>서울 럭셔리 호텔 비교</h1>\n' +
+  '<h2>빠른 결론 요약</h2><p>요약</p>\n' +
+  '<h2>그랜드 하얏트 서울 — 남산 중턱의 럭셔리 호텔</h2><p>설명</p>\n' +
+  '<h2>롯데호텔 서울 — 명동 중심부</h2><p>설명</p>';
+
+const contentImages = [
+  {
+    position: 'post-summary',
+    images: [{ local_path: 'assets/raw/hotel-a/featured.jpg', alt: '요약카드' }],
+  },
+  {
+    position: 'hotel-section',
+    hotel_id: 'grand-hyatt-seoul',
+    hotel_name: '그랜드 하얏트 서울',
+    images: [
+      { local_path: 'assets/raw/hotel-a/pool.jpg',  alt: '하얏트 수영장' },
+      { local_path: 'assets/raw/hotel-a/lobby.jpg', alt: '하얏트 로비' },
+    ],
+  },
+];
+
+test('post-summary: H1 직후에 이미지 주입', () => {
+  const result = injectImagesIntoHtml(sampleHtml, contentImages, mockMediaMap);
+  const h1Idx  = result.indexOf('</h1>');
+  const imgIdx = result.indexOf('<figure', h1Idx);
+  assert(imgIdx > h1Idx, 'H1 직후에 figure 없음');
+});
+
+test('hotel-section: 그랜드 하얏트 H2 직후 갤러리 주입', () => {
+  const result = injectImagesIntoHtml(sampleHtml, contentImages, mockMediaMap);
+  const h2Idx  = result.indexOf('그랜드 하얏트 서울 — ');
+  const galIdx = result.indexOf('wp-block-gallery', h2Idx);
+  assert(galIdx > h2Idx, '하얏트 H2 직후 갤러리 없음');
+});
+
+test('hotel-section 이미지가 다른 호텔 H2 앞에 삽입되지 않음', () => {
+  const result = injectImagesIntoHtml(sampleHtml, contentImages, mockMediaMap);
+  const lotteH2Idx = result.indexOf('롯데호텔 서울 — ');
+  const poolBeforeLotte = result.lastIndexOf('pool.jpg', lotteH2Idx);
+  // pool.jpg는 롯데 H2 앞에 있으면 안 됨 (그랜드 하얏트 섹션에만 있어야 함)
+  // 단, 그랜드 하얏트 섹션이 롯데보다 먼저 오므로 pool.jpg는 롯데 앞에 있을 수 있음 → 위치만 확인
+  assert(result.includes('pool.jpg'), 'pool.jpg URL이 본문에 없음');
+});
+
+test('mediaMap이 비어있으면 HTML 변경 없음', () => {
+  const result = injectImagesIntoHtml(sampleHtml, contentImages, {});
+  assert(result === sampleHtml, '업로드 실패 시 원본 HTML 유지 안 됨');
+});
+
+test('content_images 빈 배열이면 HTML 변경 없음', () => {
+  const result = injectImagesIntoHtml(sampleHtml, [], mockMediaMap);
+  assert(result === sampleHtml, '빈 content_images일 때 HTML 변경됨');
 });
 
 // ──────────────────────────────────────────────

@@ -108,8 +108,196 @@ function extractFAQ(md) {
   return items;
 }
 
+/**
+ * config 파일 로드 공통 헬퍼.
+ */
+function loadConfigMap(filename) {
+  const p = path.join(__dirname, '..', 'config', filename);
+  try { return JSON.parse(fs.readFileSync(p, 'utf8')); }
+  catch { return { city: {}, type: {} }; }
+}
+
+function loadCategoryMap() { return loadConfigMap('category-map.json'); }
+function loadTagMap()      { return loadConfigMap('tag-map.json'); }
+
+/**
+ * 글 제목/본문 키워드로 WP 카테고리 ID 배열 추론.
+ * - 매핑은 config/category-map.json에서 로드 (하드코딩 없음)
+ * - 매핑 ID가 비어있으면 빈 배열 반환 (WP ID 채우기 전까지 경고로 처리)
+ *
+ * @param {string} title
+ * @param {string} body
+ * @param {Object} categoryMap  loadCategoryMap() 반환값
+ * @returns {number[]}
+ */
+function inferCategories(title, body, categoryMap) {
+  const text = `${title} ${body}`.toLowerCase();
+  const ids = new Set();
+
+  for (const [keyword, wpIds] of Object.entries(categoryMap.city || {})) {
+    if (text.includes(keyword.toLowerCase())) {
+      wpIds.forEach(id => ids.add(id));
+    }
+  }
+  for (const [keyword, wpIds] of Object.entries(categoryMap.type || {})) {
+    if (text.includes(keyword.toLowerCase())) {
+      wpIds.forEach(id => ids.add(id));
+    }
+  }
+
+  return [...ids];
+}
+
+/**
+ * 글 제목/본문 키워드로 WP 태그 ID 배열 추론.
+ * inferCategories와 동일한 구조 — config/tag-map.json 기반.
+ */
+function inferTags(title, body, tagMap) {
+  const text = `${title} ${body}`.toLowerCase();
+  const ids = new Set();
+  for (const [keyword, wpIds] of Object.entries(tagMap.city || {})) {
+    if (text.includes(keyword.toLowerCase())) wpIds.forEach(id => ids.add(id));
+  }
+  for (const [keyword, wpIds] of Object.entries(tagMap.type || {})) {
+    if (text.includes(keyword.toLowerCase())) wpIds.forEach(id => ids.add(id));
+  }
+  return [...ids];
+}
+
+/**
+ * assets/processed/{post_slug}/featured.webp 존재 여부 확인.
+ * make-post-image.js가 생성한 파일을 build-wp-post가 자동 감지.
+ *
+ * @param {string} postSlug
+ * @returns {string|null} 상대 경로 or null
+ */
+function resolvePostFeaturedImage(postSlug) {
+  const PROCESSED = path.join(__dirname, '..', 'assets', 'processed');
+  const preferred  = path.join(PROCESSED, postSlug, 'featured.webp');
+  if (fs.existsSync(preferred)) {
+    return path.posix.join('assets/processed', postSlug, 'featured.webp');
+  }
+  // webp 외 다른 포맷도 허용
+  const dir = path.join(PROCESSED, postSlug);
+  if (!fs.existsSync(dir)) return null;
+  const img = fs.readdirSync(dir).find(f => /\.(webp|jpg|jpeg|png)$/i.test(f) && !/alt/.test(f));
+  return img ? path.posix.join('assets/processed', postSlug, img) : null;
+}
+
+// ── 본문 이미지 자동 삽입 지원 ────────────────────────────────────────────────
+
+const IMG_EXTS   = new Set(['.jpg', '.jpeg', '.png', '.webp']);
+const SKIP_FILE  = /alt-texts|\.gitkeep/i;
+
+// 파일명 키워드 → 한국어 특징어
+const FEATURE_MAP_KO = {
+  featured: '대표이미지', main: '대표이미지', hero: '대표이미지', cover: '대표이미지',
+  pool: '수영장', swim: '수영장', lobby: '로비', room: '객실', suite: '스위트룸',
+  restaurant: '레스토랑', dining: '다이닝', gym: '피트니스', spa: '스파',
+  rooftop: '루프탑', view: '전망', exterior: '외관', breakfast: '조식',
+  bar: '바', lounge: '라운지', bathroom: '욕실', garden: '정원',
+};
+
+function getFilenameFeatureKo(filename) {
+  const base = path.basename(filename, path.extname(filename))
+    .toLowerCase().replace(/[-_]/g, ' ');
+  for (const [kw, label] of Object.entries(FEATURE_MAP_KO)) {
+    if (base.split(' ').includes(kw) || base.includes(kw)) return label;
+  }
+  return null;
+}
+
+/**
+ * 호텔 이미지 목록 반환.
+ * assets/processed/{hotelId}/ 우선, 없으면 assets/raw/{hotelId}/ 사용.
+ *
+ * @returns {{ local_path: string, alt: string }[]}
+ */
+function resolveHotelImages(hotelId, hotelName, city, max = 4) {
+  const ROOT_DIR   = path.join(__dirname, '..');
+  const candidates = [
+    { dir: path.join(ROOT_DIR, 'assets', 'processed', hotelId), prefix: `assets/processed/${hotelId}` },
+    { dir: path.join(ROOT_DIR, 'assets', 'raw',       hotelId), prefix: `assets/raw/${hotelId}` },
+  ];
+
+  // processed alt-texts.json 로드 (있으면)
+  let altTexts = {};
+  const altJsonPath = path.join(ROOT_DIR, 'assets', 'processed', hotelId, 'alt-texts.json');
+  if (fs.existsSync(altJsonPath)) {
+    try { altTexts = JSON.parse(fs.readFileSync(altJsonPath, 'utf8')); } catch {}
+  }
+
+  const results = [];
+  for (const { dir, prefix } of candidates) {
+    if (!fs.existsSync(dir)) continue;
+    const files = fs.readdirSync(dir)
+      .filter(f => IMG_EXTS.has(path.extname(f).toLowerCase()) && !SKIP_FILE.test(f))
+      .sort();
+    for (const f of files) {
+      if (results.length >= max) break;
+      const localPath = `${prefix}/${f}`;
+      // alt 우선순위: alt-texts.json → 파일명 특징어 → 기본
+      const altKey = f.replace(/\.(jpg|jpeg|png)$/i, '.webp');
+      const alt = altTexts[altKey] || altTexts[f] || (() => {
+        const feat = getFilenameFeatureKo(f);
+        return feat ? `${hotelName} ${feat}` : `${hotelName} ${city || ''} 호텔`.trim();
+      })();
+      results.push({ local_path: localPath, alt });
+    }
+    if (results.length >= max) break;
+  }
+  return results;
+}
+
+/**
+ * 글 전체 content_images 배열 생성.
+ * - post-summary : H1 직후 삽입 (요약 카드)
+ * - hotel-section: 각 호텔 H2 직후 삽입
+ * 총 이미지 상한: 8장.
+ *
+ * @param {string}   postSlug
+ * @param {object[]} briefHotels  [{hotel_id, hotel_name, city}]
+ * @returns {object[]}
+ */
+function buildContentImages(postSlug, briefHotels) {
+  const ROOT_DIR = path.join(__dirname, '..');
+  const items = [];
+  let total   = 0;
+
+  // 1) 글 상단 요약 카드
+  const summaryPath = `assets/processed/${postSlug}/featured.webp`;
+  if (fs.existsSync(path.join(ROOT_DIR, summaryPath))) {
+    const altJsonPath = path.join(ROOT_DIR, 'assets', 'processed', postSlug, 'alt-texts.json');
+    let alt = `${postSlug.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')} 대표 이미지`;
+    if (fs.existsSync(altJsonPath)) {
+      try {
+        const aj = JSON.parse(fs.readFileSync(altJsonPath, 'utf8'));
+        alt = aj['featured.webp'] || alt;
+      } catch {}
+    }
+    items.push({ position: 'post-summary', images: [{ local_path: summaryPath, alt }] });
+    total++;
+  }
+
+  // 2) 호텔별 이미지
+  for (const hotel of (briefHotels || [])) {
+    if (total >= 8) break;
+    const max    = Math.min(4, 8 - total);
+    const images = resolveHotelImages(hotel.hotel_id, hotel.hotel_name, hotel.city || '', max);
+    if (images.length === 0) continue; // WARN은 wp-publish 단계에서
+    items.push({ position: 'hotel-section', hotel_id: hotel.hotel_id, hotel_name: hotel.hotel_name, images });
+    total += images.length;
+  }
+
+  return items;
+}
+
 // ── exports (require 시 함수만 노출) ─────────────────────────────────────────
-module.exports = { parseFrontMatter, minimalMdToHtml, extractAffiliateLinks, extractInternalLinks, extractFAQ };
+module.exports = {
+  parseFrontMatter, minimalMdToHtml, extractAffiliateLinks, extractInternalLinks,
+  extractFAQ, inferCategories, inferTags, resolvePostFeaturedImage,
+  resolveHotelImages, buildContentImages, getFilenameFeatureKo,
+};
 
 // ── CLI 실행부 (직접 실행할 때만) ─────────────────────────────────────────────
 if (require.main === module) {
@@ -147,20 +335,15 @@ if (require.main === module) {
 
   const { fm, body } = parseFrontMatter(raw);
 
-  // brief 파일에서 coverage_score 평균 추정
-  function loadCoverageScore(slug) {
+  // brief 파일 로드 (coverage_score + hotels 공유)
+  function loadBrief(slug) {
     const briefPattern = `brief-${slug}-`;
     const files = fs.existsSync(DRAFTS_DIR)
       ? fs.readdirSync(DRAFTS_DIR).filter(f => f.startsWith(briefPattern) && f.endsWith('.json'))
       : [];
     if (files.length === 0) return null;
-    const latest = files.sort().at(-1);
-    try {
-      const brief = JSON.parse(fs.readFileSync(path.join(DRAFTS_DIR, latest), 'utf8'));
-      const scores = (brief.hotels || []).map(h => h.coverage_score).filter(Boolean);
-      if (scores.length === 0) return null;
-      return Math.round(scores.reduce((a, b) => a + b, 0) / scores.length);
-    } catch { return null; }
+    try { return JSON.parse(fs.readFileSync(path.join(DRAFTS_DIR, files.sort().at(-1)), 'utf8')); }
+    catch { return null; }
   }
 
   const SITE_URL = (process.env.SITE_URL || process.env.WP_URL || 'https://tripprice.net').replace(/\/$/, '');
@@ -168,7 +351,15 @@ if (require.main === module) {
   const affiliateLinks = extractAffiliateLinks(raw);
   const internalLinks  = extractInternalLinks(raw);
   const faqItems       = extractFAQ(raw);
-  const coverageScore  = loadCoverageScore(slug);
+  const brief          = loadBrief(slug);
+  const coverageScore  = (() => {
+    const scores = (brief?.hotels || []).map(h => h.coverage_score).filter(Boolean);
+    return scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : null;
+  })();
+  const categoryMap        = loadCategoryMap();
+  const tagMap             = loadTagMap();
+  const inferredCategories = inferCategories(fm.title || '', body, categoryMap);
+  const inferredTags       = inferTags(fm.title || '', body, tagMap);
 
   const warnings = [];
 
@@ -178,10 +369,20 @@ if (require.main === module) {
     slug,
     post_status:  'draft',
     lang:         fm.lang || 'ko',
-    post_excerpt: '',
+    post_excerpt: fm.excerpt || '',
 
     meta: {
       meta_description: fm.meta_description || '',
+      canonical_url:    `${SITE_URL}/${fm.lang || 'ko'}/${slug}/`,
+    },
+
+    // Yoast SEO 자동 주입 필드.
+    // wp-publish.js가 _yoast_wpseo_* 키로 REST API에 전달.
+    // wordpress/mu-plugin/tripprice-seo-meta.php 배포 후 실제 저장 시작.
+    yoast_meta: {
+      focus_keyphrase:  fm.focus_keyphrase        || '',
+      seo_title:        fm.yoast_seo_title         || '',
+      meta_description: fm.yoast_meta_description  || fm.meta_description || '',
       canonical_url:    `${SITE_URL}/${fm.lang || 'ko'}/${slug}/`,
     },
 
@@ -193,9 +394,18 @@ if (require.main === module) {
     content_markdown: body,
     ...(args.html ? { content_html: minimalMdToHtml(body) } : {}),
 
-    featured_media: null,
-    categories:     [],
-    tags:           [],
+    // URL을 draft JSON에 저장. wp-publish 단계에서 미디어 업로드 후 attachment ID로 교체.
+    // WP REST API의 featured_media 필드는 integer ID를 기대하므로 URL을 직접 넣지 않는다.
+    // 우선순위: front-matter featured_image_url > assets/processed/{post_slug}/featured.webp
+    featured_media_url: fm.featured_image_url || resolvePostFeaturedImage(slug) || null,
+
+    // 본문 이미지 삽입 계획. wp-publish 단계에서 WP 업로드 후 HTML에 주입.
+    // - post-summary: H1 직후 요약 카드 1장
+    // - hotel-section: 각 호텔 H2 직후 2~4장
+    content_images: buildContentImages(slug, brief?.hotels || []),
+
+    categories: inferredCategories,
+    tags:       inferredTags,
 
     affiliate_links: affiliateLinks,
     internal_links:  internalLinks,
@@ -235,12 +445,15 @@ if (require.main === module) {
   };
 
   // 경고 수집
-  if (!post.post_title)             warnings.push('post_title 없음 — front-matter title 확인 필요');
-  if (!post.meta.meta_description)  warnings.push('meta_description 없음');
-  if (post.categories.length === 0) warnings.push('categories 비어있음 — WP 발행 전 채워야 합니다');
-  if (post.tags.length === 0)       warnings.push('tags 비어있음 — WP 발행 전 채워야 합니다');
-  if (affiliateLinks.length === 0)  warnings.push('affiliate_links 없음 — CTA 패턴을 찾지 못했습니다');
-  if (coverageScore == null)        warnings.push('coverage_score 없음 — brief 파일을 찾지 못했습니다');
+  if (!post.post_title)                   warnings.push('post_title 없음 — front-matter title 확인 필요');
+  if (!post.meta.meta_description)        warnings.push('meta_description 없음');
+  if (post.categories.length === 0)       warnings.push('categories 비어있음 — config/category-map.json에 WP ID를 채우거나 front-matter에 categories 지정 필요');
+  if (post.tags.length === 0)             warnings.push('tags 비어있음 — config/tag-map.json에 WP ID를 채우거나 front-matter에 tags 지정 필요');
+  if (!post.featured_media_url)           warnings.push('featured_media_url 없음 — front-matter featured_image_url 지정 필요. wp-publish 시 미디어 업로드 건너뜀');
+  if (!post.yoast_meta.focus_keyphrase)  warnings.push('yoast focus_keyphrase 없음 — front-matter focus_keyphrase 확인 필요');
+  if (!post.yoast_meta.seo_title)        warnings.push('yoast seo_title 없음 — front-matter yoast_seo_title 확인 필요');
+  if (affiliateLinks.length === 0)        warnings.push('affiliate_links 없음 — CTA 패턴을 찾지 못했습니다');
+  if (coverageScore == null)              warnings.push('coverage_score 없음 — brief 파일을 찾지 못했습니다');
 
   // 필수 필드 검증
   const REQUIRED = ['post_title', 'slug', 'post_status', 'lang'];
@@ -269,12 +482,17 @@ if (require.main === module) {
   console.log(`  post_status:      "${post.post_status}"  ← 항상 draft`);
   console.log(`  lang:             "${post.lang}"`);
   console.log(`  meta_desc 길이:   ${post.meta.meta_description.length}자`);
-  console.log(`  affiliate_links:  ${post.affiliate_links.length}개`);
-  console.log(`  internal_links:   ${post.internal_links.length}개`);
-  console.log(`  faq 항목:         ${faqItems.length}개`);
-  console.log(`  coverage_score:   ${coverageScore ?? '없음 (brief 미참조)'}`);
-  console.log(`  data_notice:      포함`);
-  console.log(`  affiliate_notice: 포함`);
+  console.log(`  affiliate_links:    ${post.affiliate_links.length}개`);
+  console.log(`  internal_links:     ${post.internal_links.length}개`);
+  console.log(`  faq 항목:           ${faqItems.length}개`);
+  console.log(`  categories (추론):  [${post.categories.join(', ') || '비어있음'}]`);
+  console.log(`  tags (추론):        [${post.tags.join(', ') || '비어있음'}]`);
+  console.log(`  featured_media_url: ${post.featured_media_url || '없음 (wp-publish 시 미디어 업로드 건너뜀)'}`);
+  const totalContentImages = (post.content_images || []).reduce((s, sec) => s + (sec.images || []).length, 0);
+  console.log(`  content_images:     ${post.content_images.length}개 섹션, 총 ${totalContentImages}장`);
+  console.log(`  coverage_score:     ${coverageScore ?? '없음 (brief 미참조)'}`);
+  console.log(`  data_notice:        포함`);
+  console.log(`  affiliate_notice:   포함`);
   console.log(`  workflow_state:   brief/draft/seo_qa=true, cta=${post.workflow_state.cta}, internal_links=${post.workflow_state.internal_links}`);
 
   if (warnings.length > 0) {

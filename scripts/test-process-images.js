@@ -213,6 +213,132 @@ test('parseFilenameFeature: 빈 문자열 → null', () => {
 });
 
 // ──────────────────────────────────────────────
+// 5. make-post-image — 순수 함수 테스트
+// ──────────────────────────────────────────────
+console.log('\n[5] make-post-image — slugToTitle / buildCardAltText / buildCardSvg\n');
+
+const { buildCardSvg, buildCardAltText, slugToTitle, escapeXml } = require('./make-post-image');
+
+test('slugToTitle: 하이픈 분리 + 대문자화', () => {
+  assertEqual(slugToTitle('grand-hyatt-seoul'), 'Grand Hyatt Seoul');
+  assertEqual(slugToTitle('seoul-luxury-comparison'), 'Seoul Luxury Comparison');
+});
+
+test('slugToTitle: 단일 단어', () => {
+  assertEqual(slugToTitle('seoul'), 'Seoul');
+});
+
+test('escapeXml: & < > " 이스케이프', () => {
+  const result = escapeXml('A & B < C > D "E"');
+  assert(result.includes('&amp;'), '& 미이스케이프');
+  assert(result.includes('&lt;'),  '< 미이스케이프');
+  assert(result.includes('&gt;'),  '> 미이스케이프');
+  assert(result.includes('&quot;'), '" 미이스케이프');
+});
+
+test('buildCardAltText: ko 비교 카드', () => {
+  const alt = buildCardAltText({
+    postSlug: 'seoul-luxury-comparison',
+    hotelNames: ['그랜드 하얏트 서울', '롯데호텔 서울'],
+    lang: 'ko',
+    isCard: true,
+  });
+  assert(alt.includes('그랜드 하얏트 서울'), '첫 번째 호텔명 없음');
+  assert(alt.includes('롯데호텔 서울'),      '두 번째 호텔명 없음');
+  assert(alt.length <= 100,                  `alt 100자 초과 (${alt.length}자)`);
+});
+
+test('buildCardAltText: en 언어', () => {
+  const alt = buildCardAltText({
+    postSlug: 'seoul-luxury-comparison',
+    hotelNames: ['Grand Hyatt Seoul', 'Lotte Hotel Seoul'],
+    lang: 'en',
+  });
+  assert(alt.includes('Featured Image'), 'en alt 텍스트 형식 오류');
+});
+
+test('buildCardAltText: 호텔명 3개 이상이면 앞 2개만', () => {
+  const alt = buildCardAltText({
+    postSlug:   'test-comparison',
+    hotelNames: ['A', 'B', 'C'],
+    lang: 'ko',
+  });
+  assert(!alt.includes(' vs C'), '3번째 호텔이 alt에 포함되면 안 됨');
+});
+
+test('buildCardSvg: SVG Buffer 반환', () => {
+  const svg = buildCardSvg({
+    postSlug:   'seoul-luxury-comparison',
+    hotelSlugs: ['grand-hyatt-seoul', 'lotte-hotel-seoul'],
+  });
+  assert(Buffer.isBuffer(svg), 'Buffer여야 함');
+  assert(svg.length > 100, 'SVG가 너무 짧음');
+});
+
+test('buildCardSvg: svg 태그 포함', () => {
+  const svg = buildCardSvg({
+    postSlug:   'test-post',
+    hotelSlugs: ['hotel-a', 'hotel-b'],
+  }).toString();
+  assert(svg.includes('<svg'), '<svg> 태그 없음');
+  assert(svg.includes('</svg>'), '</svg> 태그 없음');
+});
+
+test('buildCardSvg: 호텔명 vs 구분자 포함', () => {
+  const svg = buildCardSvg({
+    postSlug:   'test-post',
+    hotelSlugs: ['hotel-alpha', 'hotel-beta'],
+  }).toString();
+  assert(svg.includes('Hotel Alpha'), '첫 번째 호텔명 없음');
+  assert(svg.includes('Hotel Beta'),  '두 번째 호텔명 없음');
+  assert(svg.includes(' vs '),        'vs 구분자 없음');
+});
+
+test('buildCardSvg: Tripprice 브랜딩 포함', () => {
+  const svg = buildCardSvg({
+    postSlug:   'test-post',
+    hotelSlugs: ['hotel-a'],
+  }).toString();
+  assert(svg.includes('Tripprice'), 'Tripprice 브랜딩 없음');
+});
+
+test('buildCardSvg: watermark 옵션 opacity 차이', () => {
+  const withWm    = buildCardSvg({ postSlug: 'p', hotelSlugs: ['h'], watermark: true  }).toString();
+  const withoutWm = buildCardSvg({ postSlug: 'p', hotelSlugs: ['h'], watermark: false }).toString();
+  assert(withWm !== withoutWm, 'watermark 옵션이 SVG에 영향 없음');
+});
+
+// ──────────────────────────────────────────────
+// 6. wp-publish — featured_media 연결 (mock)
+// ──────────────────────────────────────────────
+console.log('\n[6] wp-publish — featured_media payload 연결\n');
+
+const { buildPayload } = require('./wp-publish');
+
+test('featuredMediaId 전달 시 payload.featured_media 설정', () => {
+  const payload = buildPayload(
+    { post_title: '글', slug: 's', lang: 'ko', content_html: '<p>x</p>' },
+    { featuredMediaId: 42 }
+  );
+  assertEqual(payload.featured_media, 42, 'featured_media가 42여야 함');
+});
+
+test('featuredMediaId 없으면 payload.featured_media 미설정', () => {
+  const payload = buildPayload(
+    { post_title: '글', slug: 's', lang: 'ko', content_html: '<p>x</p>' }
+  );
+  assert(payload.featured_media === undefined, 'featured_media가 없어야 함');
+});
+
+test('featuredMediaId=null이면 payload.featured_media 미설정', () => {
+  const payload = buildPayload(
+    { post_title: '글', slug: 's', lang: 'ko', content_html: '<p>x</p>' },
+    { featuredMediaId: null }
+  );
+  assert(payload.featured_media === undefined, 'null이면 featured_media 없어야 함');
+});
+
+// ──────────────────────────────────────────────
 // 최종 결과
 // ──────────────────────────────────────────────
 console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');

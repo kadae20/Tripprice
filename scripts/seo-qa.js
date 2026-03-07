@@ -69,6 +69,9 @@ const fm = parseFrontMatter(raw);
 const body = raw.replace(/^---[\s\S]*?---\n/, '');
 const lines = body.split('\n');
 
+// slug: fm 우선, 없으면 파일명 기반. PAYLOAD_CHECKS에서 loadPostPayload()에 필요.
+const slug = fm.slug || path.basename(draftPath, '.md').replace(/^draft-/, '');
+
 // ── 헬퍼 ─────────────────────────────────────────────────────────────────────
 const hasSection = (keyword) =>
   lines.some(l => l.startsWith('## ') && l.includes(keyword));
@@ -235,19 +238,72 @@ const CHECKS = [
   },
 ];
 
+// ── build-wp-post 산출물 payload 사전 점검 ────────────────────────────────────
+// seo-qa 이후 build-wp-post를 먼저 실행했다면 post-{slug}-*.json이 존재함.
+// 파일이 없으면 SKIP (아직 build-wp-post 미실행 상태).
+function loadPostPayload(slug) {
+  if (!fs.existsSync(DRAFTS_DIR)) return null;
+  const files = fs.readdirSync(DRAFTS_DIR)
+    .filter(f => f.startsWith(`post-${slug}-`) && f.endsWith('.json'))
+    .sort();
+  if (files.length === 0) return null;
+  try {
+    return JSON.parse(fs.readFileSync(path.join(DRAFTS_DIR, files.at(-1)), 'utf8'));
+  } catch { return null; }
+}
+
+const postPayload = loadPostPayload(slug);
+
+const PAYLOAD_CHECKS = [
+  {
+    id: 'payload-categories',
+    label: 'payload: categories 세팅',
+    check() {
+      if (!postPayload) return skip('build-wp-post 미실행 — post-*.json 없음');
+      const cats = postPayload.categories;
+      if (!Array.isArray(cats) || cats.length === 0)
+        return warn('categories 비어있음 — config/category-map.json에 WP ID 입력 필요');
+      return pass(`${cats.length}개 [${cats.join(', ')}]`);
+    },
+  },
+  {
+    id: 'payload-tags',
+    label: 'payload: tags 세팅',
+    check() {
+      if (!postPayload) return skip('build-wp-post 미실행 — post-*.json 없음');
+      const tags = postPayload.tags;
+      if (!Array.isArray(tags) || tags.length === 0)
+        return warn('tags 비어있음 — WP 발행 전 추가 권장');
+      return pass(`${tags.length}개`);
+    },
+  },
+  {
+    id: 'payload-featured-media',
+    label: 'payload: featured_media_url 존재',
+    check() {
+      if (!postPayload) return skip('build-wp-post 미실행 — post-*.json 없음');
+      if (!postPayload.featured_media_url)
+        return warn('featured_media_url 없음 — wp-publish 시 대표 이미지 업로드 건너뜀');
+      return pass(postPayload.featured_media_url.substring(0, 60) + '...');
+    },
+  },
+];
+
 // ── 결과 생성 ─────────────────────────────────────────────────────────────────
 function pass(msg)  { return { status: 'PASS', message: msg }; }
 function warn(msg)  { return { status: 'WARN', message: msg }; }
 function fail(msg)  { return { status: 'FAIL', message: msg }; }
 function skip(msg)  { return { status: 'SKIP', message: msg }; }
 
-const results = CHECKS.map(c => ({ ...c, result: c.check() }));
+const results = [
+  ...CHECKS.map(c => ({ ...c, result: c.check() })),
+  ...PAYLOAD_CHECKS.map(c => ({ ...c, result: c.check() })),
+];
 
 const counts = { PASS: 0, WARN: 0, FAIL: 0, SKIP: 0 };
 results.forEach(r => counts[r.result.status]++);
 
 const publishable = counts.FAIL === 0;
-const slug = fm.slug || path.basename(draftPath, '.md').replace(/^draft-/, '');
 
 // ── 리포트 마크다운 생성 ──────────────────────────────────────────────────────
 const ICON = { PASS: '✅', WARN: '⚠️', FAIL: '❌', SKIP: '⏭️' };
@@ -257,6 +313,7 @@ const reportLines = [
   ``,
   `- **초안 파일:** \`${path.basename(draftPath)}\``,
   `- **슬러그:** \`${slug}\``,
+  `- **payload 파일:** ${postPayload ? '✅ 확인됨 (build-wp-post 실행 완료)' : '⏭️ 없음 (build-wp-post 미실행 — payload 검사 SKIP)'}`,
   `- **점검 일시:** ${today}`,
   `- **발행 가능:** ${publishable ? '✅ 가능' : '❌ 불가 (FAIL 항목 해결 필요)'}`,
   ``,

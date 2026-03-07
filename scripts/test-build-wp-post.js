@@ -11,6 +11,9 @@ const {
   extractInternalLinks,
   extractFAQ,
   minimalMdToHtml,
+  resolveHotelImages,
+  buildContentImages,
+  getFilenameFeatureKo,
 } = require('./build-wp-post');
 
 // ── 테스트 러너 ───────────────────────────────────────────────────────────────
@@ -178,6 +181,93 @@ test('링크 변환', () => {
 test('HR 변환', () => {
   const html = minimalMdToHtml('---');
   assert(html.includes('<hr>'));
+});
+
+// ── getFilenameFeatureKo ──────────────────────────────────────────────────────
+console.log('\n[6] getFilenameFeatureKo\n');
+
+test('pool.jpg → 수영장', () => {
+  assertEqual(getFilenameFeatureKo('pool.jpg'), '수영장');
+});
+test('lobby-interior.jpg → 로비', () => {
+  assertEqual(getFilenameFeatureKo('lobby-interior.jpg'), '로비');
+});
+test('featured.jpg → 대표이미지', () => {
+  assertEqual(getFilenameFeatureKo('featured.jpg'), '대표이미지');
+});
+test('restaurant-interior.jpg → 레스토랑', () => {
+  assertEqual(getFilenameFeatureKo('restaurant-interior.jpg'), '레스토랑');
+});
+test('알 수 없는 파일명 → null', () => {
+  assertEqual(getFilenameFeatureKo('xyz-unknown.jpg'), null);
+});
+
+// ── resolveHotelImages (실제 assets/raw 사용) ─────────────────────────────────
+console.log('\n[7] resolveHotelImages\n');
+
+test('grand-hyatt-seoul raw 이미지 최대 4장 반환', () => {
+  const imgs = resolveHotelImages('grand-hyatt-seoul', '그랜드 하얏트 서울', 'seoul', 4);
+  assert(Array.isArray(imgs), '배열이어야 함');
+  assert(imgs.length > 0, 'raw 이미지 최소 1장 이상');
+  assert(imgs.length <= 4, '최대 4장 초과 안 됨');
+  assert(imgs[0].local_path.startsWith('assets/'), 'local_path가 assets/로 시작');
+  assert(typeof imgs[0].alt === 'string' && imgs[0].alt.length > 0, 'alt 텍스트 있어야 함');
+});
+
+test('grand-hyatt-seoul alt에 호텔명 포함', () => {
+  const imgs = resolveHotelImages('grand-hyatt-seoul', '그랜드 하얏트 서울', 'seoul', 4);
+  assert(imgs[0].alt.includes('그랜드 하얏트 서울'), 'alt에 호텔명 없음');
+});
+
+test('존재하지 않는 호텔 → 빈 배열', () => {
+  const imgs = resolveHotelImages('nonexistent-hotel', '존재안함', 'seoul', 4);
+  assertEqual(imgs.length, 0, '없는 호텔이면 빈 배열');
+});
+
+test('max=2이면 최대 2장', () => {
+  const imgs = resolveHotelImages('grand-hyatt-seoul', '그랜드 하얏트 서울', 'seoul', 2);
+  assert(imgs.length <= 2, '최대 2장 초과');
+});
+
+// ── buildContentImages ────────────────────────────────────────────────────────
+console.log('\n[8] buildContentImages\n');
+
+const mockHotels = [
+  { hotel_id: 'grand-hyatt-seoul', hotel_name: '그랜드 하얏트 서울', city: 'seoul' },
+  { hotel_id: 'lotte-hotel-seoul', hotel_name: '롯데호텔 서울',      city: 'seoul' },
+];
+
+test('post-summary 섹션 포함 (이미지 있을 때)', () => {
+  // assets/processed/seoul-luxury-comparison/featured.webp 존재 가정
+  const items = buildContentImages('seoul-luxury-comparison', mockHotels);
+  const hasSummary = items.some(it => it.position === 'post-summary');
+  assert(hasSummary, 'post-summary 섹션 없음 (featured.webp 없으면 PASS)');
+});
+
+test('hotel-section 구조 검증', () => {
+  const items = buildContentImages('seoul-luxury-comparison', mockHotels);
+  const hotelSections = items.filter(it => it.position === 'hotel-section');
+  for (const sec of hotelSections) {
+    assert(typeof sec.hotel_id === 'string', 'hotel_id 없음');
+    assert(typeof sec.hotel_name === 'string', 'hotel_name 없음');
+    assert(Array.isArray(sec.images), 'images 배열 없음');
+    assert(sec.images.length > 0, 'hotel-section에 이미지 없음');
+  }
+});
+
+test('빈 hotels 배열이면 hotel-section 없음', () => {
+  const items = buildContentImages('some-slug', []);
+  const hotelSections = items.filter(it => it.position === 'hotel-section');
+  assertEqual(hotelSections.length, 0, '빈 hotels인데 hotel-section이 있음');
+});
+
+test('총 이미지 8장 상한', () => {
+  const manyHotels = Array.from({ length: 5 }, (_, i) => ({
+    hotel_id: 'grand-hyatt-seoul', hotel_name: '그랜드 하얏트 서울', city: 'seoul',
+  }));
+  const items = buildContentImages('test-slug', manyHotels);
+  const total = items.reduce((s, sec) => s + (sec.images || []).length, 0);
+  assert(total <= 8, `이미지 상한 8장 초과: ${total}장`);
 });
 
 // ── 결과 ──────────────────────────────────────────────────────────────────────
