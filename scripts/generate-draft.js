@@ -108,18 +108,201 @@ function cityKo(city) {
   return map[city] || city;
 }
 
+// ── SEO 품질 보정 헬퍼 ────────────────────────────────────────────────────────
+
+// ── Yoast SEO 자동 생성 헬퍼 ─────────────────────────────────────────────────
+
+/**
+ * Focus keyphrase 자동 생성.
+ * 형식: "{도시} {카테고리} 호텔 비교" / "{호텔명} {도시} 후기"
+ */
+function buildFocusKeyphrase() {
+  const city = cityKo(hotels[0].city);
+  if (post_type === 'hotel-comparison') {
+    const allLuxury = hotels.every(h => h.hotel_category === 'luxury');
+    const qualifier = allLuxury ? '럭셔리 ' : '';
+    return `${city} ${qualifier}호텔 비교`;
+  }
+  return `${hotelName(hotels[0])} ${city} 후기`;
+}
+
+/**
+ * Yoast SEO title 자동 생성 (최대 60자).
+ * 형식: "{keyphrase}: {단축호텔명1} vs {단축호텔명2}({연도}) | Tripprice"
+ */
+function buildYoastSeoTitle(focusKeyphrase) {
+  const year = new Date().getFullYear();
+  const SITE = 'Tripprice';
+
+  // 호텔명 단축: 도시명 접미어 제거, "그랜드 " 등 선행 수식어 제거
+  function shorten(h) {
+    const city = cityKo(h.city);
+    return h.hotel_name
+      .replace(new RegExp(`\\s*${city}$`), '')   // 끝 도시명 제거
+      .replace(/^(그랜드|파크|더|롯데)\s+/, ''); // 일반 선행어 제거
+  }
+
+  if (post_type === 'hotel-comparison') {
+    const names = hotels.map(shorten).join(' vs ');
+    const candidate = `${focusKeyphrase}: ${names}(${year}) | ${SITE}`;
+    return candidate.length <= 60 ? candidate : candidate.slice(0, 58) + '…';
+  }
+  const h = hotels[0];
+  const candidate = `${hotelName(h)} 리뷰 ${year} — ${focusKeyphrase} | ${SITE}`;
+  return candidate.length <= 60 ? candidate : candidate.slice(0, 58) + '…';
+}
+
+/**
+ * Yoast meta description 자동 생성 (120~155자).
+ * 검색 결과 클릭을 유도하는 action-oriented 문장.
+ * focus keyphrase를 앞쪽에 배치.
+ */
+function buildYoastMetaDesc(focusKeyphrase) {
+  const city = cityKo(hotels[0].city);
+  const year = new Date().getFullYear();
+  const names = hotels.map(h => h.hotel_name).join('과 ');
+
+  // selection_criteria에서 비교 기준 추출 (최대 4개)
+  const criteria = (selection_criteria || [])
+    .map(c => c.replace(/\s*\(.*?\)/g, '').trim())  // 괄호 설명 제거
+    .slice(0, 4)
+    .join(', ');
+
+  let desc;
+  if (post_type === 'hotel-comparison') {
+    desc = `${focusKeyphrase} 가이드(${year}). ${names}을 ${criteria} 기준으로 비교해 어떤 여행자에게 맞는지 정리했습니다.`;
+  } else {
+    const h = hotels[0];
+    desc = `${hotelName(h)} ${city} 솔직 리뷰(${year}). 위치, 가격, 시설, 투숙객 후기 기반으로 ${focusKeyphrase}에 대한 장단점을 정리했습니다.`;
+  }
+
+  // 120자 미달 시 가격 정보 추가
+  if (desc.length < 120) {
+    const priceMin = Math.min(...hotels.map(h => h.price_min).filter(Boolean));
+    if (priceMin) desc += ` ${(priceMin / 10000).toFixed(0)}만원대부터 예약 가능.`;
+  }
+
+  return desc.length > 155 ? desc.slice(0, 153) + '…' : desc;
+}
+
+/**
+ * SEO title 최소 30자 확보.
+ * 짧으면 호텔명·연도를 자연스럽게 덧붙여 확장한다.
+ * 60자 초과 시 말줄임표 처리.
+ */
+function ensureMinTitle(title) {
+  if (title.length >= 30) return title;
+  const year = new Date().getFullYear();
+  let extended;
+  if (post_type === 'hotel-comparison') {
+    const names = hotels.map(hotelName).join(' vs ');
+    extended = `${title} — ${names} ${year}`;
+  } else {
+    const h = hotels[0];
+    extended = `${title} — ${cityKo(h.city)} ${h.star_rating || ''}성급 솔직 리뷰 ${year}`;
+  }
+  return extended.length > 60 ? extended.slice(0, 58) + '…' : extended;
+}
+
+/**
+ * meta_description 최소 120자, 최대 155자 확보.
+ * 부족하면 도시·페르소나·가격대 정보를 문장으로 이어붙인다.
+ */
+function ensureMinMeta(meta) {
+  if (meta.length >= 120) return meta.slice(0, 155);
+  const cityName = cityKo(hotels[0].city);
+  const personas = [...new Set(hotels.flatMap(h => h.target_persona || []))]
+    .map(p => ({ couple: '커플', business: '출장', family: '가족', solo: '솔로' }[p] || p))
+    .join('·');
+  const priceMin = Math.min(...hotels.map(h => h.price_min).filter(Boolean));
+  const additions = [];
+  if (post_type === 'hotel-comparison') {
+    additions.push(
+      `${cityName} 여행에서 자주 비교되는 두 호텔을 위치·가격·시설·투숙객 후기 기준으로 직접 분석했습니다.`
+    );
+    if (personas) additions.push(`${personas} 여행자 각각에게 맞는 선택 기준도 정리했습니다.`);
+    if (priceMin) additions.push(`${(priceMin / 10000).toFixed(0)}만원대부터 예약 가능.`);
+  } else {
+    const h = hotels[0];
+    additions.push(`실제 투숙 데이터 기반으로 ${hotelName(h)}의 장단점을 솔직하게 분석합니다.`);
+    if (personas) additions.push(`${personas} 여행자에게 적합한지 확인하세요.`);
+  }
+  let extended = meta;
+  for (const a of additions) {
+    if (extended.length >= 120) break;
+    const sep = extended.match(/[.다]$/) ? ' ' : '. ';
+    extended = `${extended}${sep}${a}`;
+  }
+  return extended.length > 155 ? extended.slice(0, 153) + '…' : extended;
+}
+
+/**
+ * post_excerpt 자동 생성 (2~3문장, 200자 이내).
+ * "누구를 위한 글인지 + 핵심 가치"를 담아 wp-publish의 excerpt 필드로 전달.
+ */
+function buildExcerpt() {
+  const cityName = cityKo(hotels[0].city);
+  const personas = [...new Set(hotels.flatMap(h => h.target_persona || []))]
+    .map(p => ({ couple: '커플', business: '출장객', family: '가족 여행자', solo: '솔로 여행자' }[p] || p))
+    .join(', ');
+
+  let excerpt;
+  if (post_type === 'hotel-comparison') {
+    const names = hotels.map(hotelName).join(', ');
+    excerpt = `${cityName} 여행을 앞두고 ${names} 중 어디가 더 맞는지 고민이라면 이 글이 도움이 됩니다.`;
+    if (personas) excerpt += ` ${personas}에게 각각 어떤 호텔이 적합한지, 위치·가격·시설을 기준으로 비교 정리했습니다.`;
+  } else {
+    const h = hotels[0];
+    excerpt = `${hotelName(h)} 예약을 고민 중인 ${personas || '여행자'}를 위한 솔직한 분석 글입니다.`;
+    excerpt += ` 위치, 주요 시설, 실제 투숙객 후기 기반 장단점을 정리해 예약 결정을 돕습니다.`;
+  }
+
+  return excerpt.length > 200 ? excerpt.slice(0, 198) + '…' : excerpt;
+}
+
+/**
+ * featured_image_url 결정:
+ * 1) assets/processed/{hotel_id}/ 에 webp/jpg 파일이 있으면 그것을 사용
+ * 2) 없으면 null (build-wp-post가 front-matter에 빈 필드로 포함 → wp-publish 건너뜀)
+ */
+function resolveFeaturedImageUrl() {
+  const ASSETS_DIR = path.join(__dirname, '..', 'assets', 'processed');
+  for (const h of hotels) {
+    const dir = path.join(ASSETS_DIR, h.hotel_id);
+    if (!fs.existsSync(dir)) continue;
+    const images = fs.readdirSync(dir).filter(f => /\.(webp|jpg|jpeg|png)$/i.test(f));
+    if (images.length === 0) continue;
+    const preferred = images.find(f => /featured|main|hero|01/.test(f)) || images[0];
+    return path.posix.join('assets/processed', h.hotel_id, preferred);
+  }
+  return null;
+}
+
 // ── 섹션 빌더 ─────────────────────────────────────────────────────────────────
 
 function buildFrontMatter() {
+  const title             = ensureMinTitle(suggested_title);
+  const metaDesc          = ensureMinMeta(suggested_meta_description);
+  const featuredImageUrl  = resolveFeaturedImageUrl();
+  const excerpt           = buildExcerpt();
+  const focusKeyphrase    = buildFocusKeyphrase();
+  const yoastSeoTitle     = buildYoastSeoTitle(focusKeyphrase);
+  const yoastMetaDesc     = buildYoastMetaDesc(focusKeyphrase);
+
   return [
     '---',
-    `title: "${suggested_title}"`,
+    `title: "${title}"`,
     `slug: "${slug}"`,
-    `meta_description: "${suggested_meta_description}"`,
+    `meta_description: "${metaDesc}"`,
+    `excerpt: "${excerpt}"`,
+    `focus_keyphrase: "${focusKeyphrase}"`,
+    `yoast_seo_title: "${yoastSeoTitle}"`,
+    `yoast_meta_description: "${yoastMetaDesc}"`,
     `lang: ${lang}`,
     `post_type: ${post_type}`,
     `created_at: ${today}`,
     `workflow_state: brief_done`,
+    `featured_image_url: ${featuredImageUrl ? `"${featuredImageUrl}"` : ''}`,
     '---',
     '',
   ].join('\n');
@@ -321,43 +504,89 @@ function buildFooter() {
   ].join('\n');
 }
 
-// ── 마크다운 조립 ─────────────────────────────────────────────────────────────
-const sections = [];
-
-sections.push(buildFrontMatter());
-sections.push(`# ${suggested_title}\n`);
-sections.push(buildQuickSummary());
-sections.push(buildTargetReader());
-sections.push(buildCriteria());
-
-if (post_type === 'hotel-comparison') {
-  sections.push(buildComparisonTable());
+// ── 템플릿 본문 빌더 (Z.ai 폴백용) ──────────────────────────────────────────
+function buildTemplateBody() {
+  const parts = [];
+  parts.push(`# ${ensureMinTitle(suggested_title)}\n`);
+  parts.push(buildQuickSummary());
+  parts.push(buildTargetReader());
+  parts.push(buildCriteria());
+  if (post_type === 'hotel-comparison') {
+    parts.push(buildComparisonTable());
+  }
+  hotels.forEach(h => parts.push(buildHotelSection(h)));
+  parts.push(buildFAQ());
+  parts.push(buildInternalLinks());
+  parts.push(buildFooter());
+  return parts.join('\n');
 }
 
-hotels.forEach(h => sections.push(buildHotelSection(h)));
+function validateAiBody(text) {
+  if (!text || text.length < 800)                      return false;
+  if (!/^#\s/.test(text.trim()))                       return false;
+  if (!/##\s*(자주\s*묻는|FAQ)/i.test(text))           return false;
+  if (!/현재\s*가격\s*확인하기/.test(text))             return false;
+  if (!/가격·혜택·환불/.test(text))                    return false;
+  return true;
+}
 
-sections.push(buildFAQ());
-sections.push(buildInternalLinks());
-sections.push(buildFooter());
+// ── 마크다운 조립 (async: Z.ai 우선, 실패 시 템플릿 폴백) ─────────────────────
+(async () => {
+  const frontMatter = buildFrontMatter();
+  let body;
+  let source = 'template';
 
-const markdown = sections.join('\n');
+  try {
+    const zai    = require('../lib/zai-client');
+    const aiBody = await zai.generateHotelDraft(brief);
+    if (validateAiBody(aiBody)) {
+      body   = aiBody;
+      source = 'z.ai';
+    } else {
+      console.error('  ⚠  Z.ai 응답 검증 실패 → 템플릿 폴백');
+      body = buildTemplateBody();
+    }
+  } catch (err) {
+    const reason = process.env.ZAI_API_KEY ? err.message : 'ZAI_API_KEY 없음';
+    console.error(`  ⚠  Z.ai 건너뜀 (${reason}) → 템플릿 폴백`);
+    body = buildTemplateBody();
+  }
 
-// ── 출력 ──────────────────────────────────────────────────────────────────────
-const outFilename = `draft-${slug}-${today}.md`;
-const outPath = path.join(DRAFTS_DIR, outFilename);
-fs.writeFileSync(outPath, markdown, 'utf8');
+  const markdown = frontMatter + '\n' + body;
 
-// 섹션 목록 추출 (H2 헤더)
-const sectionList = markdown.split('\n')
-  .filter(l => l.startsWith('## '))
-  .map(l => l.replace('## ', '').trim());
+  // ── 출력 ──────────────────────────────────────────────────────────────────
+  const outFilename = `draft-${slug}-${today}.md`;
+  const outPath = path.join(DRAFTS_DIR, outFilename);
+  fs.writeFileSync(outPath, markdown, 'utf8');
 
-console.log('\n초안 생성 완료');
-console.log(`  파일: ${outPath}`);
-console.log(`  제목: ${suggested_title}`);
-console.log(`  슬러그: ${slug}`);
-console.log(`  호텔: ${hotels.map(hotelName).join(', ')}`);
-console.log(`\n포함된 섹션:`);
-sectionList.forEach(s => console.log(`  - ${s}`));
-console.log(`\n다음 단계:`);
-console.log(`  node scripts/seo-qa.js --draft=${outFilename.replace('.md', '')}`);
+  // 섹션 목록 추출 (H2 헤더)
+  const sectionList = markdown.split('\n')
+    .filter(l => l.startsWith('## '))
+    .map(l => l.replace('## ', '').trim());
+
+  const finalTitle       = ensureMinTitle(suggested_title);
+  const finalMeta        = ensureMinMeta(suggested_meta_description);
+  const finalFeaturedUrl = resolveFeaturedImageUrl();
+  const finalKeyphrase   = buildFocusKeyphrase();
+  const finalYoastTitle  = buildYoastSeoTitle(finalKeyphrase);
+  const finalYoastMeta   = buildYoastMetaDesc(finalKeyphrase);
+
+  console.log('\n초안 생성 완료');
+  console.log(`  파일: ${outPath}`);
+  console.log(`  초안 생성: ${source}`);
+  console.log(`  제목: ${finalTitle} (${finalTitle.length}자)`);
+  console.log(`  슬러그: ${slug}`);
+  console.log(`  호텔: ${hotels.map(hotelName).join(', ')}`);
+  console.log(`  meta_desc: ${finalMeta.length}자`);
+  console.log(`  focus_keyphrase:    "${finalKeyphrase}"`);
+  console.log(`  yoast_seo_title:    "${finalYoastTitle}" (${finalYoastTitle.length}자)`);
+  console.log(`  yoast_meta_desc:    ${finalYoastMeta.length}자`);
+  console.log(`  featured_image_url: ${finalFeaturedUrl || '없음 (assets/processed 이미지 없음)'}`);
+  console.log(`\n포함된 섹션:`);
+  sectionList.forEach(s => console.log(`  - ${s}`));
+  console.log(`\n다음 단계:`);
+  console.log(`  node scripts/seo-qa.js --draft=${outFilename.replace('.md', '')}`);
+})().catch(err => {
+  console.error('초안 생성 실패:', err.message);
+  process.exit(1);
+});

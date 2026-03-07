@@ -1,0 +1,17 @@
+[
+  {
+    "hotels": "grand-hyatt-seoul,lotte-hotel-seoul",
+    "lang": "ko",
+    "note": "서울 럭셔리 호텔 비교 (한국어)"
+  },
+  {
+    "hotels": "jw-marriott-seoul",
+    "lang": "ko",
+    "note": "서울 JW 메리어트 단독 리뷰"
+  },
+  {
+    "hotels": "shilla-hotel-seoul",
+    "lang": "ko",
+    "note": "신라 호텔 서울 단독 리뷰"
+  }
+]

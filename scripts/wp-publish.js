@@ -2,12 +2,15 @@
 /**
  * wp-publish.js
  *
- * WordPress REST API 기반 Draft 발행 스크립트.
- * publish 상태는 차단됩니다. draft만 허용.
+ * WordPress REST API 기반 글 발행 스크립트.
  *
  * 사용법:
  *   WP_URL=https://example.com WP_USER=admin WP_APP_PASS="xxxx xxxx xxxx" \
  *     node scripts/wp-publish.js wordpress/sample-post.json
+ *   node scripts/wp-publish.js wordpress/sample-post.json --status=publish
+ *
+ * 옵션:
+ *   --status=draft|publish   발행 상태 (기본: draft)
  *
  * 필수 환경변수:
  *   WP_URL      — 워드프레스 사이트 URL (예: https://tripprice.net)
@@ -287,21 +290,233 @@ function validateInput(data) {
 }
 
 // ──────────────────────────────────────────────
+// 미디어 업로드 — 로컬 파일 경로 → WP attachment ID
+// featured_media_url이 로컬 경로(http 아님)일 때 호출.
+// 실패 시 null 반환 (경고만, 발행은 계속).
+// ──────────────────────────────────────────────
+async function uploadMediaFromFile(localPath, { WP_URL, authHeader }) {
+  const absPath = path.resolve(ROOT, localPath);
+  if (!require('fs').existsSync(absPath)) {
+    console.warn(`  ⚠  로컬 이미지 없음 (featured_media 건너뜀): ${absPath}`);
+    return null;
+  }
+
+  const buffer = require('fs').readFileSync(absPath);
+  const ext    = require('path').extname(absPath).toLowerCase();
+  const ctMap  = { '.webp': 'image/webp', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png' };
+  const contentType = ctMap[ext] || 'image/jpeg';
+  const filename    = require('path').basename(absPath);
+
+  const endpoint = `${WP_URL}/wp-json/wp/v2/media`;
+  let uploadResponse;
+  try {
+    uploadResponse = await fetch(endpoint, {
+      method:  'POST',
+      headers: {
+        'Authorization':       authHeader,
+        'Content-Type':        contentType,
+        'Content-Disposition': `attachment; filename="${filename}"`,
+      },
+      body: buffer,
+    });
+  } catch (err) {
+    console.warn(`  ⚠  미디어 업로드 API 오류 (featured_media 건너뜀): ${err.message}`);
+    return null;
+  }
+
+  if (!uploadResponse.ok) {
+    const text = await uploadResponse.text().catch(() => '');
+    console.warn(`  ⚠  미디어 업로드 실패 HTTP ${uploadResponse.status} — featured_media 건너뜀`);
+    console.warn(`       응답: ${text.substring(0, 120)}`);
+    return null;
+  }
+
+  const media = await uploadResponse.json();
+  console.log(`  ✓  미디어 업로드 완료 — attachment ID: ${media.id} (${filename})`);
+  return media.id;
+}
+
+// ──────────────────────────────────────────────
+// 미디어 업로드 (URL → WP attachment ID)
+// featured_media_url을 WP 미디어 라이브러리에 업로드하고
+// attachment ID를 반환. 실패 시 null 반환 (경고만, 발행은 계속).
+// ──────────────────────────────────────────────
+async function uploadMediaFromUrl(imageUrl, { WP_URL, authHeader }) {
+  // 1) 이미지 다운로드
+  let imgResponse;
+  try {
+    imgResponse = await fetch(imageUrl);
+  } catch (err) {
+    console.warn(`  ⚠  이미지 다운로드 실패 (featured_media 건너뜀): ${err.message}`);
+    return null;
+  }
+  if (!imgResponse.ok) {
+    console.warn(`  ⚠  이미지 다운로드 실패 HTTP ${imgResponse.status} — featured_media 건너뜀`);
+    return null;
+  }
+
+  const buffer = Buffer.from(await imgResponse.arrayBuffer());
+  const contentType = imgResponse.headers.get('content-type') || 'image/jpeg';
+  const filename = imageUrl.split('/').pop().split('?')[0] || 'featured-image.jpg';
+
+  // 2) WP 미디어 업로드
+  const endpoint = `${WP_URL}/wp-json/wp/v2/media`;
+  let uploadResponse;
+  try {
+    uploadResponse = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Authorization':        authHeader,
+        'Content-Type':         contentType,
+        'Content-Disposition':  `attachment; filename="${filename}"`,
+      },
+      body: buffer,
+    });
+  } catch (err) {
+    console.warn(`  ⚠  미디어 업로드 API 오류 (featured_media 건너뜀): ${err.message}`);
+    return null;
+  }
+
+  if (!uploadResponse.ok) {
+    const text = await uploadResponse.text().catch(() => '');
+    console.warn(`  ⚠  미디어 업로드 실패 HTTP ${uploadResponse.status} — featured_media 건너뜀`);
+    console.warn(`       응답: ${text.substring(0, 120)}`);
+    return null;
+  }
+
+  const media = await uploadResponse.json();
+  console.log(`  ✓  미디어 업로드 완료 — attachment ID: ${media.id} (${filename})`);
+  return media.id;
+}
+
+// ──────────────────────────────────────────────
+// 본문 이미지 HTML 주입 지원
+// ──────────────────────────────────────────────
+
+function escapeAttr(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
+
+function escapeRe(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * 이미지 섹션 1개 → figure HTML.
+ * 1장: wp-block-image, 2장 이상: wp-block-gallery.
+ *
+ * @param {{ local_path, alt }[]} imgs
+ * @param {Object} mediaMap  localPath → { id, url }
+ * @returns {string}
+ */
+function buildFigureHtml(imgs, mediaMap) {
+  const resolved = (imgs || [])
+    .filter(img => mediaMap[img.local_path])
+    .map(img => ({ url: mediaMap[img.local_path].url, alt: img.alt }));
+
+  if (resolved.length === 0) return '';
+
+  if (resolved.length === 1) {
+    const { url, alt } = resolved[0];
+    return `\n<figure class="wp-block-image size-large">` +
+           `<img src="${escapeAttr(url)}" alt="${escapeAttr(alt)}" loading="lazy"/></figure>\n`;
+  }
+
+  const cols  = Math.min(resolved.length, 3);
+  const items = resolved.map(({ url, alt }) =>
+    `<figure class="wp-block-gallery-item">` +
+    `<img src="${escapeAttr(url)}" alt="${escapeAttr(alt)}" loading="lazy"/></figure>`
+  ).join('');
+  return `\n<figure class="wp-block-gallery columns-${cols}">${items}</figure>\n`;
+}
+
+/**
+ * HTML content에 content_images를 주입.
+ * - post-summary → <h1> 직후
+ * - hotel-section → 해당 호텔명 포함 <h2> 직후
+ *
+ * @param {string}   html
+ * @param {object[]} contentImages
+ * @param {Object}   mediaMap
+ * @returns {string}
+ */
+function injectImagesIntoHtml(html, contentImages, mediaMap) {
+  let result = html;
+
+  for (const section of (contentImages || [])) {
+    const fig = buildFigureHtml(section.images || [], mediaMap);
+    if (!fig) continue;
+
+    if (section.position === 'post-summary') {
+      // <h1>...</h1> 직후
+      result = result.replace(/(<h1>[^<]*<\/h1>)/, `$1${fig}`);
+
+    } else if (section.position === 'hotel-section' && section.hotel_name) {
+      // <h2>...{hotel_name}...</h2> 직후
+      const re = new RegExp(
+        `(<h2>[^<]*${escapeRe(section.hotel_name)}[^<]*<\\/h2>)`, 'i'
+      );
+      result = result.replace(re, `$1${fig}`);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * content_images 배열의 이미지를 전부 WP 미디어 라이브러리에 업로드.
+ * 업로드 성공 시 mediaMap에 { local_path → { id, url } } 추가.
+ * 개별 실패는 WARN만 출력하고 계속.
+ *
+ * @returns {Object} mediaMap
+ */
+async function uploadContentImages(contentImages, env) {
+  const mediaMap = {};
+
+  for (const section of (contentImages || [])) {
+    for (const img of (section.images || [])) {
+      const lp = img.local_path;
+      if (!lp || mediaMap[lp]) continue; // 이미 업로드된 경우 스킵
+
+      const id = await uploadMediaFromFile(lp, env);
+      if (!id) continue;
+
+      // source_url 확보
+      try {
+        const res = await fetch(`${env.WP_URL}/wp-json/wp/v2/media/${id}`, {
+          headers: { Authorization: env.authHeader },
+        });
+        if (res.ok) {
+          const media = await res.json();
+          mediaMap[lp] = { id, url: media.source_url };
+        }
+      } catch (err) {
+        console.warn(`  ⚠  source_url 조회 실패 (${lp}): ${err.message}`);
+      }
+    }
+  }
+
+  return mediaMap;
+}
+
+// ──────────────────────────────────────────────
 // WP REST API 페이로드 빌드
 // ──────────────────────────────────────────────
-function buildPayload(data) {
-  // 콘텐츠: HTML 우선, 없으면 Markdown 변환
+function buildPayload(data, { featuredMediaId = null, injectedContentHtml = null, status = 'draft' } = {}) {
+  // 콘텐츠: 주입된 HTML > content_html > content_markdown 변환
   let contentHTML;
-  if (data.content_html && data.content_html.trim() !== '') {
+  if (injectedContentHtml) {
+    contentHTML = injectedContentHtml;
+  } else if (data.content_html && data.content_html.trim() !== '') {
     contentHTML = data.content_html;
   } else {
     contentHTML = markdownToHTML(data.content_markdown || '');
   }
 
   const payload = {
-    title: data.post_title,
-    slug: data.slug,
-    status: 'draft', // 항상 draft 강제
+    title:   data.post_title,
+    slug:    data.slug,
+    status,
     content: contentHTML,
     excerpt: data.post_excerpt || '',
   };
@@ -314,18 +529,36 @@ function buildPayload(data) {
     payload.tags = data.tags;
   }
 
-  // 메타 필드 (SEO 플러그인 연동)
-  const metaFields = {};
-
-  if (data.meta?.meta_description) {
-    // Yoast SEO (가장 일반적)
-    metaFields._yoast_wpseo_metadesc = data.meta.meta_description;
-    // Rank Math 사용 시: metaFields.rank_math_description = data.meta.meta_description;
-    // All in One SEO 사용 시: metaFields._aioseop_description = data.meta.meta_description;
+  // 대표 이미지: URL이 아닌 WP attachment ID 사용 (WP REST API 규격)
+  // featured_media_url은 draft JSON 전용 필드. 실제 ID는 uploadMediaFromUrl()로 획득.
+  if (featuredMediaId) {
+    payload.featured_media = featuredMediaId;
   }
 
-  if (data.meta?.canonical_url) {
-    metaFields._yoast_wpseo_canonical = data.meta.canonical_url;
+  // 메타 필드 (SEO 플러그인 연동)
+  // yoast_meta 우선, 없으면 meta 폴백
+  const metaFields = {};
+
+  // Yoast SEO 4개 필드 자동 주입
+  // 전제: wordpress/mu-plugin/tripprice-seo-meta.php 가 WP 서버에 배포되어 있어야 실제 저장됨
+  const focusKeyphrase = data.yoast_meta?.focus_keyphrase || '';
+  if (focusKeyphrase) {
+    metaFields._yoast_wpseo_focuskw = focusKeyphrase;
+  }
+
+  const yoastSeoTitle = data.yoast_meta?.seo_title || '';
+  if (yoastSeoTitle) {
+    metaFields._yoast_wpseo_title = yoastSeoTitle;
+  }
+
+  const metaDesc = data.yoast_meta?.meta_description || data.meta?.meta_description || '';
+  if (metaDesc) {
+    metaFields._yoast_wpseo_metadesc = metaDesc;
+  }
+
+  const canonicalUrl = data.yoast_meta?.canonical_url || data.meta?.canonical_url || '';
+  if (canonicalUrl) {
+    metaFields._yoast_wpseo_canonical = canonicalUrl;
   }
 
   if (Object.keys(metaFields).length > 0) {
@@ -406,15 +639,6 @@ async function publishToWP(payload, { WP_URL, authHeader }) {
     );
   }
 
-  // 응답에서 publish 상태 이중 확인 (방어적)
-  if (body?.status === 'publish') {
-    throw new Error(
-      '이상 감지: 응답 status가 "publish"입니다. 즉시 WordPress에서 확인하세요.\n' +
-      `  post_id: ${body.id}\n` +
-      `  edit_url: ${body.link}`
-    );
-  }
-
   return body;
 }
 
@@ -448,12 +672,20 @@ function saveResult(slug, result, inputPath) {
 // 메인
 // ──────────────────────────────────────────────
 async function main() {
+  // ── CLI 파싱 ────────────────────────────────────────────────────────────────
+  const cliArgs    = process.argv.slice(2);
+  const inputArg   = cliArgs.find(a => !a.startsWith('--'));
+  const flagMap    = Object.fromEntries(
+    cliArgs.filter(a => a.startsWith('--'))
+      .map(a => { const [k, v] = a.slice(2).split('='); return [k, v ?? true]; })
+  );
+  const postStatus = ['draft', 'publish'].includes(flagMap.status) ? flagMap.status : 'draft';
+
   console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log(' Tripprice — WordPress Draft 발행');
+  console.log(` Tripprice — WordPress 발행 (status: ${postStatus})`);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
   // 1) 인자 확인
-  const inputArg = process.argv[2];
   if (!inputArg) {
     console.error(
       '[오류] 입력 파일이 지정되지 않았습니다.\n\n' +
@@ -504,14 +736,58 @@ async function main() {
   }
 
   console.log(`글 제목: ${data.post_title}`);
-  console.log(`slug: ${data.slug}`);
-  console.log(`언어: ${data.lang}`);
-  console.log(`상태: draft (강제)\n`);
+  console.log(`slug:    ${data.slug}`);
+  console.log(`언어:    ${data.lang}`);
+  console.log(`상태:    ${postStatus}\n`);
 
-  // 5) 페이로드 빌드
-  const payload = buildPayload(data);
+  // 5) 대표 이미지 업로드 (featured_media_url → attachment ID)
+  // URL이면 원격 다운로드, 로컬 경로면 파일 직접 읽어 업로드
+  let featuredMediaId = null;
+  if (data.featured_media_url) {
+    const fmu = data.featured_media_url;
+    console.log(`대표 이미지 업로드 중: ${fmu}`);
+    if (/^https?:\/\//.test(fmu)) {
+      featuredMediaId = await uploadMediaFromUrl(fmu, env);
+    } else {
+      featuredMediaId = await uploadMediaFromFile(fmu, env);
+    }
+  } else {
+    console.log('featured_media_url 없음 — 대표 이미지 업로드 건너뜀');
+  }
 
-  // 6) 발행
+  // 5.5) 본문 이미지 업로드 + HTML 주입
+  let injectedContentHtml = null;
+  if (Array.isArray(data.content_images) && data.content_images.length > 0) {
+    const totalImgs = data.content_images.reduce((s, sec) => s + (sec.images || []).length, 0);
+    console.log(`본문 이미지 업로드 중 (${data.content_images.length}개 섹션, 총 ${totalImgs}장)...`);
+    const mediaMap = await uploadContentImages(data.content_images, env);
+    const uploaded = Object.keys(mediaMap).length;
+    if (uploaded > 0) {
+      const baseHtml = data.content_html && data.content_html.trim()
+        ? data.content_html
+        : markdownToHTML(data.content_markdown || '');
+      injectedContentHtml = injectImagesIntoHtml(baseHtml, data.content_images, mediaMap);
+      console.log(`  ✓  본문 이미지 주입 완료 (${uploaded}장)`);
+    } else {
+      console.log('  ⚠  본문 이미지 업로드 실패 — 텍스트만 발행');
+    }
+  }
+
+  // 6) 페이로드 빌드
+  const payload = buildPayload(data, { featuredMediaId, injectedContentHtml, status: postStatus });
+
+  // Yoast meta 주입 여부 안내
+  if (data.yoast_meta?.focus_keyphrase) {
+    console.log(`Yoast 포커스 키프레이즈: ${data.yoast_meta.focus_keyphrase}`);
+  }
+  if (data.yoast_meta?.seo_title) {
+    console.log(`Yoast SEO 제목: ${data.yoast_meta.seo_title}`);
+  }
+  if (!data.yoast_meta?.focus_keyphrase && !data.yoast_meta?.seo_title) {
+    console.log('yoast_meta 없음 — Yoast 필드 주입 건너뜀 (mu-plugin 배포 후 재실행 가능)');
+  }
+
+  // 7) 발행
   console.log('WordPress REST API 호출 중...');
   let result;
   try {
@@ -525,7 +801,8 @@ async function main() {
   const { outPath, record } = saveResult(data.slug, result, inputPath);
 
   // 8) 성공 출력
-  console.log('\n✓  Draft 발행 성공!');
+  const isPublished = result.status === 'publish';
+  console.log(`\n✓  ${isPublished ? '발행 성공!' : 'Draft 저장 성공!'}`);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log(` post_id  : ${record.post_id}`);
   console.log(` status   : ${result.status}`);
@@ -533,7 +810,9 @@ async function main() {
   console.log(` edit_url : ${env.WP_URL}/wp-admin/post.php?post=${record.post_id}&action=edit`);
   console.log(` 결과 저장: ${path.relative(ROOT, outPath)}`);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('\n다음 단계: WordPress 관리자 화면에서 검토 후 Publish 하세요.\n');
+  if (!isPublished) {
+    console.log('\n다음 단계: WordPress 관리자 화면에서 검토 후 Publish 하세요.\n');
+  }
 }
 
 // 직접 실행 시에만 main() 호출 (require로 불러올 때는 실행 안 함)
@@ -542,4 +821,8 @@ if (require.main === module) {
 }
 
 // 테스트에서 사용할 수 있도록 핵심 함수 export
-module.exports = { validateInput, markdownToHTML, buildPayload };
+module.exports = {
+  validateInput, markdownToHTML, buildPayload,
+  uploadMediaFromUrl, uploadMediaFromFile, uploadContentImages,
+  buildFigureHtml, injectImagesIntoHtml,
+};
