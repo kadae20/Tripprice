@@ -21,6 +21,9 @@ npm-debug.log*
 state/coverage/
 state/campaigns/*-published.json
 state/campaigns/ingest-report-*.md
+state/campaigns/seo-qa-*.json
+state/campaigns/seo-qa-*.md
+state/campaigns/image-report-*.md
 
 # 원본/처리 이미지 (용량 큼, 서버에서 다운로드 → 서버에서 wp-publish)
 assets/raw/
@@ -37,6 +40,12 @@ data/processed/
 
 # 자동 생성 콘텐츠 초안 (파이프라인 출력물 — 커밋 불필요)
 wordpress/drafts/
+
+# Agoda Partners CSV / 월간 리포트 (재무 데이터, 용량 큼)
+downloads/
+
+# Newsroom 일일 실행 로그 (자동 생성, 용량 큼)
+state/newsroom-log-*.json
 
 # OS / 에디터
 .DS_Store
