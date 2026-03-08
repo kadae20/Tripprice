@@ -248,7 +248,13 @@ async function main() {
 
   console.log(`  agoda_hotel_id: ${agodaId}`);
 
-  const urls = await fetchFromApi(agodaId);
+  // ① Content API 시도
+  let urls = await fetchFromApi(agodaId);
+
+  // ② Content API 실패 시 Affiliate Lite API로 폴백
+  if (urls.length === 0) {
+    urls = await fetchFromAffiliateLite(agodaId);
+  }
 
   fs.mkdirSync(cacheDir, { recursive: true });
   fs.writeFileSync(cacheFile, JSON.stringify({
@@ -262,6 +268,36 @@ async function main() {
     console.log('  → URL 0개 저장 — 하위 단계에서 SVG 카드로 폴백됩니다');
   } else {
     console.log(`  → ${urls.length}개 URL 캐시 저장: cache/agoda-images/${hotelId}/urls.json`);
+  }
+}
+
+// ── Affiliate Lite 폴백 ────────────────────────────────────────────────────────
+
+/**
+ * Affiliate Lite API에서 imageUrl 1개 이상 확보.
+ * Content API가 redirect/권한 오류로 실패했을 때만 호출.
+ *
+ * @param {string|number} agodaHotelId
+ * @returns {Promise<string[]>}
+ */
+async function fetchFromAffiliateLite(agodaHotelId) {
+  const lite = require('../lib/agoda-affiliate-lite');
+  try {
+    const hotel = await lite.getHotel(agodaHotelId);
+    if (!hotel) {
+      console.log('  ℹ  Affiliate Lite: 응답 없음 — SVG 카드로 폴백');
+      return [];
+    }
+    const urls = [hotel.imageUrl].filter(u => typeof u === 'string' && u.startsWith('http'));
+    if (urls.length > 0) {
+      console.log(`  → Affiliate Lite 이미지 URL ${urls.length}개 확보`);
+    } else {
+      console.log('  ℹ  Affiliate Lite: imageUrl 없음 — SVG 카드로 폴백');
+    }
+    return urls;
+  } catch (e) {
+    console.warn(`  ⚠  Affiliate Lite 폴백 실패: ${e.message}`);
+    return [];
   }
 }
 

@@ -84,9 +84,10 @@ function wpGet(path) {
     console.log(`  [1] 이미지 블록 존재      : ${imgOk ? 'OK' : 'FAIL'}`);
     if (!imgOk) allOk = false;
 
-    // 2. 파트너 링크 (CID)
-    const CID   = process.env.AGODA_CID || '1926938';
-    const cidOk = html.includes(`cid=${CID}`) || html.includes('agoda.com');
+    // 2. 파트너 링크 (cid= 파라미터 포함 agoda.com href, 또는 Affiliate Lite landingURL)
+    const CID     = process.env.AGODA_CID || '1926938';
+    const cidOk   = html.includes(`cid=${CID}`) ||
+                    /href="https?:\/\/(?:www\.)?agoda\.com\//.test(html);
     console.log(`  [2] 파트너 링크 존재       : ${cidOk ? 'OK' : 'FAIL'}`);
     if (!cidOk) allOk = false;
 

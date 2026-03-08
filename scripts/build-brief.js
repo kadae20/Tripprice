@@ -189,16 +189,61 @@ const brief = {
   },
 };
 
-// ── 출력 ──────────────────────────────────────────────────────────────────────
-const outPath = path.join(DRAFTS_DIR, `${brief.brief_id}.json`);
-fs.writeFileSync(outPath, JSON.stringify(brief, null, 2), 'utf8');
+// ── Affiliate Lite API 보강 (landing_url / image_url_lite / daily_rate_krw) ──
+/**
+ * Affiliate Lite API를 호출해 brief의 각 호텔에 landing_url 등을 주입한다.
+ * API 키 없거나 오류 시 조용히 건너뜀 — 파이프라인 중단 없음.
+ */
+async function enrichWithAffiliateLite(hotelList) {
+  const apiKey = process.env.AGODA_API_KEY || '';
+  if (!apiKey) return; // API 키 없으면 skip
 
-console.log(`\n브리프 생성 완료`);
-console.log(`  파일: ${outPath}`);
-console.log(`  슬러그: ${slug}`);
-console.log(`  호텔: ${hotels.map(h => h.hotel_name).join(', ')}`);
-if (blocked.length > 0) {
-  console.log(`  차단: ${blocked.map(b => b.hotel_id).join(', ')} (coverage 미달)`);
+  const agodaIds = hotelList.map(h => h.agoda_hotel_id).filter(Boolean);
+  if (agodaIds.length === 0) return;
+
+  const lite = require('../lib/agoda-affiliate-lite');
+  const results = await lite.search(agodaIds);
+  if (results.length === 0) return;
+
+  for (const hotel of hotelList) {
+    if (!hotel.agoda_hotel_id) continue;
+    const liteData = results.find(r => String(r.hotelId) === String(hotel.agoda_hotel_id));
+    if (!liteData) continue;
+
+    if (liteData.landingUrl && liteData.landingUrl.startsWith('http')) {
+      hotel.landing_url = liteData.landingUrl;
+    }
+    if (liteData.imageUrl && liteData.imageUrl.startsWith('http')) {
+      hotel.image_url_lite = liteData.imageUrl;
+    }
+    if (liteData.dailyRate > 0) {
+      hotel.daily_rate_krw = liteData.dailyRate;
+    }
+  }
+
+  const enriched = hotelList.filter(h => h.landing_url).length;
+  if (enriched > 0) {
+    console.log(`  → Affiliate Lite 보강: ${enriched}개 호텔 landing_url/image_url 주입 완료`);
+  }
 }
-console.log(`\n다음 단계:`);
-console.log(`  node scripts/generate-draft.js --brief=${brief.brief_id}`);
+
+// ── 출력 (async IIFE: Lite API 보강 후 저장) ─────────────────────────────────
+(async () => {
+  await enrichWithAffiliateLite(brief.hotels);
+
+  const outPath = path.join(DRAFTS_DIR, `${brief.brief_id}.json`);
+  fs.writeFileSync(outPath, JSON.stringify(brief, null, 2), 'utf8');
+
+  console.log(`\n브리프 생성 완료`);
+  console.log(`  파일: ${outPath}`);
+  console.log(`  슬러그: ${slug}`);
+  console.log(`  호텔: ${hotels.map(h => h.hotel_name).join(', ')}`);
+  if (blocked.length > 0) {
+    console.log(`  차단: ${blocked.map(b => b.hotel_id).join(', ')} (coverage 미달)`);
+  }
+  console.log(`\n다음 단계:`);
+  console.log(`  node scripts/generate-draft.js --brief=${brief.brief_id}`);
+})().catch(err => {
+  console.error(`브리프 저장 오류: ${err.message}`);
+  process.exit(1);
+});
