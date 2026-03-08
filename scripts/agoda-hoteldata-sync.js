@@ -44,8 +44,7 @@ const ROOT          = path.resolve(__dirname, '..');
 const HOTELDATA_DIR = path.join(ROOT, process.env.HOTELDATA_DIR || 'downloads/agoda/hoteldata');
 const LATEST_CSV    = path.join(ROOT, 'data', 'hotels', 'hotels-latest.csv');
 const KEEP          = Math.max(1, parseInt(process.env.HOTELDATA_KEEP || '2', 10));
-const STORAGE_PATH  = path.join(HOTELDATA_DIR, 'auth', 'storageState.json');
-const DEBUG_DIR     = path.join(HOTELDATA_DIR, 'debug');
+const LOG_PATH      = path.join(ROOT, 'logs', 'hoteldata-sync.log');
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 const args = Object.fromEntries(
@@ -55,7 +54,32 @@ const args = Object.fromEntries(
 );
 const DRY_RUN   = args['dry-run'] === true;
 const FORCE     = args['force']   === true;
-const DEBUG     = args['debug']   === true;
+
+// ── 실패 기록 / 텔레그램 알림 ─────────────────────────────────────────────────
+function writeFailLog(reason) {
+  try {
+    fs.mkdirSync(path.dirname(LOG_PATH), { recursive: true });
+    fs.appendFileSync(LOG_PATH, `[${new Date().toISOString()}] FAIL: ${reason}\n`, 'utf8');
+  } catch { /* 로그 실패는 무시 */ }
+}
+
+function notifyTelegram(msg) {
+  const token  = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
+  const chatId = (process.env.TELEGRAM_CHAT_ID   || '').trim();
+  if (!token || !chatId) return Promise.resolve();
+  const body = JSON.stringify({ chat_id: chatId, text: msg });
+  return new Promise(resolve => {
+    const req = https.request({
+      hostname: 'api.telegram.org', port: 443,
+      path: `/bot${token}/sendMessage`, method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    }, res => { res.resume(); resolve(); });
+    req.on('error', () => resolve());
+    req.setTimeout(10_000, () => { req.destroy(); resolve(); });
+    req.write(body);
+    req.end();
+  });
+}
 
 // ── ISO 주차 레이블 ───────────────────────────────────────────────────────────
 // 예: 2026-W10 (ISO 8601 주차, 월요일 기준)
@@ -98,7 +122,14 @@ function downloadToFile(url, destPath, hop = 0) {
       }
       if (res.statusCode !== 200) {
         res.resume();
-        return reject(new Error(`HTTP ${res.statusCode}`));
+        return reject(new Error(`HTTP ${res.statusCode} — URL이 만료되었거나 권한 없음`));
+      }
+
+      // Content-Type 검사: zip 또는 octet-stream이어야 함
+      const ct = (res.headers['content-type'] || '').toLowerCase();
+      if (!ct.includes('zip') && !ct.includes('octet-stream') && !ct.includes('binary')) {
+        res.resume();
+        return reject(new Error(`Content-Type 불일치: "${ct || '없음'}" (zip/octet-stream 필요) — URL 갱신 필요`));
       }
 
       fs.mkdirSync(path.dirname(destPath), { recursive: true });
@@ -242,218 +273,17 @@ async function downloadDirect(url, weekDir, zipPath) {
   fs.mkdirSync(weekDir, { recursive: true });
   console.log('  다운로드 시작 (직접 URL)...');
   await downloadWithRetry(url, zipPath);
+
+  // 크기 검사: 5MB 미만은 비정상 응답으로 간주
+  const zipStat = fs.statSync(zipPath);
+  if (zipStat.size < 5 * 1024 * 1024) {
+    fs.unlinkSync(zipPath);
+    throw new Error(`파일 크기 불충분: ${(zipStat.size / 1024 / 1024).toFixed(2)}MB (최소 5MB) — URL 갱신 필요`);
+  }
+
   return true;
 }
 
-// ── Mode B 헬퍼 ───────────────────────────────────────────────────────────────
-
-/** 쿠키배너/팝업 닫기 (없어도 계속) */
-async function dismissCookieBanner(page) {
-  try {
-    for (const kw of ['Accept', 'Agree', 'OK', '동의', 'Got it', 'Close']) {
-      const btn = await page.$(`button:has-text("${kw}"), [role="button"]:has-text("${kw}")`);
-      if (btn) { await btn.click(); await page.waitForTimeout(500); return; }
-    }
-  } catch { /* 배너 없음 — 무시 */ }
-}
-
-/** xml.agoda.com/hoteldatafiles/ zip URL 추출 (앵커 → 텍스트 정규식 순) */
-async function extractZipUrl(page) {
-  const fromAnchors = await page.evaluate(() => {
-    const m = Array.from(document.querySelectorAll('a[href]')).find(a =>
-      a.href.includes('hoteldatafiles') ||
-      (a.href.includes('agoda') && a.href.endsWith('.zip')) ||
-      a.href.endsWith('.zip')
-    );
-    return m ? m.href : '';
-  });
-  if (fromAnchors) return fromAnchors;
-
-  const text = await page.evaluate(() => document.body.innerText || '');
-  const m = text.match(/https:\/\/xml\.agoda\.com\/hoteldatafiles\/[^\s"'<>]+\.zip[^\s"'<>]*/);
-  return m ? m[0] : '';
-}
-
-/** 디버그 아티팩트 3종 저장 (시크릿 미포함) */
-async function saveDebugArtifacts(page, reason) {
-  try {
-    fs.mkdirSync(DEBUG_DIR, { recursive: true });
-    await page.screenshot({ path: path.join(DEBUG_DIR, 'login-fail.png'), fullPage: true });
-    fs.writeFileSync(path.join(DEBUG_DIR, 'login-fail.html'), await page.content(), 'utf8');
-    fs.writeFileSync(path.join(DEBUG_DIR, 'login-fail.txt'), [
-      `URL   : ${page.url()}`,
-      `TITLE : ${await page.title()}`,
-      `REASON: ${reason}`,
-      `TIME  : ${new Date().toISOString()}`,
-    ].join('\n'), 'utf8');
-    console.warn(`  ⚠  디버그 저장: ${path.relative(ROOT, DEBUG_DIR)}/login-fail.{png,html,txt}`);
-  } catch (e) {
-    console.warn(`  ⚠  디버그 저장 실패: ${e.message}`);
-  }
-}
-
-/** 로그인 수행 (SPA 렌더 대기 + Next 버튼 처리) */
-async function performLogin(page, email, password) {
-  await page.goto('https://partners.agoda.com/signin', {
-    waitUntil: 'networkidle', timeout: 30_000,
-  });
-  await dismissCookieBanner(page);
-
-  // 이메일 필드 (SPA 동적 렌더 대기)
-  const emailSel = [
-    'input[type="email"]',
-    'input[name*="email" i]',
-    'input[autocomplete="email"]',
-    'input[name*="user" i]',
-    'input[type="text"]',
-  ].join(', ');
-  await page.waitForSelector(emailSel, { timeout: 30_000 });
-  await page.fill(emailSel, email);
-
-  // Next 버튼 있으면 클릭 후 비밀번호 단계로
-  const nextBtn = await page.$([
-    'button[data-element-name="login-next"]',
-    'button:has-text("Next")',
-    'button:has-text("다음")',
-    'button:has-text("Continue")',
-  ].join(', '));
-  if (nextBtn) {
-    await nextBtn.click();
-    await page.waitForTimeout(2000);
-  }
-
-  // 비밀번호 입력
-  const pwSel = 'input[type="password"], input[name*="pass" i]';
-  await page.waitForSelector(pwSel, { timeout: 20_000 });
-  await page.fill(pwSel, password);
-
-  // 제출
-  await page.click('button[type="submit"], button[data-element-name="login-submit"], input[type="submit"]');
-  await page.waitForLoadState('networkidle', { timeout: 30_000 });
-
-  // 성공 검증 — 아직 /signin 또는 /login 경로면 실패
-  if (/\/(signin|login)/i.test(new URL(page.url()).pathname)) {
-    const errText = await page.evaluate(() => {
-      const el = document.querySelector('[role="alert"], [class*="error" i], [class*="alert" i]');
-      return el ? el.innerText.trim().slice(0, 200) : '';
-    });
-    throw new Error(`로그인 실패${errText ? ` — ${errText}` : ' — 자격증명/2FA 확인'}`);
-  }
-}
-
-// ── Mode B: Playwright 로그인 → 링크 추출 → 다운로드 ────────────────────────
-const HD_PAGES = [
-  'https://partners.agoda.com/tools/hotelData',
-  'https://partners.agoda.com/en-us/affiliates/tools/hoteldata.aspx',
-];
-
-async function downloadViaPlaywright(weekDir, zipPath) {
-  const email    = process.env.AGODA_PARTNER_EMAIL    || '';
-  const password = process.env.AGODA_PARTNER_PASSWORD || '';
-
-  if (!email || !password) {
-    throw new Error('AGODA_PARTNER_EMAIL / AGODA_PARTNER_PASSWORD 환경변수 필요 (Mode B)');
-  }
-
-  let playwright;
-  try {
-    playwright = require('playwright');
-  } catch {
-    if (DRY_RUN) {
-      console.log('  [dry-run] URL 방식: Playwright (Mode B, playwright 미설치)');
-      console.log(`  [dry-run] zip 경로: ${path.relative(ROOT, zipPath)}`);
-      console.log(`  [dry-run] latest  : ${path.relative(ROOT, LATEST_CSV)}`);
-      console.log('\n  실제 실행 전:\n    npm install --save-dev playwright\n    npx playwright install chromium');
-      return false;
-    }
-    throw new Error('playwright 미설치:\n  npm install --save-dev playwright\n  npx playwright install chromium');
-  }
-
-  console.log(`  Playwright 모드 (email: [${email.length}자], pwd: [${password.length}자])`);
-
-  const hasState = fs.existsSync(STORAGE_PATH);
-  const ctxOpts  = { acceptDownloads: true, locale: 'ko-KR' };
-  if (hasState) ctxOpts.storageState = STORAGE_PATH;
-
-  const browser = await playwright.chromium.launch({ headless: !DEBUG });
-  const context = await browser.newContext(ctxOpts);
-  const page    = await context.newPage();
-
-  let zipUrl = '';
-  try {
-    // ── A) 저장된 세션으로 데이터 페이지 접근 시도 ──────────────────────────
-    if (hasState) {
-      console.log('  저장된 세션 사용 중...');
-      for (const hdUrl of HD_PAGES) {
-        await page.goto(hdUrl, { waitUntil: 'networkidle', timeout: 30_000 }).catch(() => null);
-        await dismissCookieBanner(page);
-        zipUrl = await extractZipUrl(page);
-        if (zipUrl) break;
-      }
-    }
-
-    // ── B) 세션 없거나 만료 → 로그인 후 재시도 ─────────────────────────────
-    if (!zipUrl) {
-      console.log(hasState ? '  세션 만료 — 재로그인...' : '  로그인 중...');
-      try {
-        await performLogin(page, email, password);
-      } catch (err) {
-        await saveDebugArtifacts(page, err.message);
-        throw err;
-      }
-      console.log('  로그인 성공');
-
-      // storageState 저장 (다음 실행 시 재활용)
-      fs.mkdirSync(path.dirname(STORAGE_PATH), { recursive: true });
-      await context.storageState({ path: STORAGE_PATH });
-      console.log(`  세션 저장: ${path.relative(ROOT, STORAGE_PATH)}`);
-
-      for (const hdUrl of HD_PAGES) {
-        await page.goto(hdUrl, { waitUntil: 'networkidle', timeout: 30_000 }).catch(() => null);
-        await dismissCookieBanner(page);
-        zipUrl = await extractZipUrl(page);
-        if (zipUrl) break;
-      }
-
-      if (!zipUrl) {
-        const reason = 'zip URL 없음 — 페이지 구조 변경 또는 계정 권한 없음';
-        await saveDebugArtifacts(page, reason);
-        throw new Error(`${reason}\n  → AGODA_HOTELDATA_URL 직접 설정 권장`);
-      }
-    }
-
-    // dry-run: URL만 출력
-    if (DRY_RUN) {
-      console.log(`  [dry-run] 발견된 URL: ${zipUrl.replace(/[?#].*$/, '?[params]')}`);
-      console.log(`  [dry-run] zip 경로  : ${path.relative(ROOT, zipPath)}`);
-      console.log(`  [dry-run] latest    : ${path.relative(ROOT, LATEST_CSV)}`);
-      return false;
-    }
-
-    // ── C) 다운로드 (Playwright download API — 세션 쿠키 자동 활용) ────────
-    console.log('  zip 다운로드 중 (Playwright)...');
-    fs.mkdirSync(weekDir, { recursive: true });
-    const partPath = zipPath + '.part';
-    if (fs.existsSync(partPath)) { try { fs.unlinkSync(partPath); } catch {} }
-
-    const [download] = await Promise.all([
-      page.waitForEvent('download', { timeout: 300_000 }),
-      page.evaluate(url => { window.location.href = url; }, zipUrl),
-    ]);
-    await download.saveAs(partPath);
-    fs.renameSync(partPath, zipPath);
-    console.log('  다운로드 완료 (Playwright)');
-    return true;
-
-  } catch (err) {
-    if (!fs.existsSync(path.join(DEBUG_DIR, 'login-fail.png'))) {
-      await saveDebugArtifacts(page, err.message);
-    }
-    throw err;
-  } finally {
-    await browser.close();
-  }
-}
 
 // ── ingest 실행 ───────────────────────────────────────────────────────────────
 function runIngest(csvPath) {
@@ -494,12 +324,44 @@ function runIngest(csvPath) {
   console.log(`  저장경로 : ${path.relative(ROOT, weekDir)}`);
   console.log(`  최신 CSV : ${path.relative(ROOT, LATEST_CSV)}`);
   console.log(`  보관     : 최근 ${KEEP}주`);
-  console.log(`  URL 방식 : ${hotelDataUrl ? `직접 URL (${hotelDataUrl.length}자)` : 'Playwright 자동 추출'}`);
   console.log(`  모드     : ${DRY_RUN ? 'dry-run (다운로드 없음)' : '실행'}`);
   console.log('');
 
+  // ── AGODA_HOTELDATA_URL 필수 확인 ────────────────────────────────────────
+  if (!hotelDataUrl) {
+    const guide = [
+      'AGODA_HOTELDATA_URL이 설정되지 않았습니다.',
+      '',
+      '설정 방법:',
+      '  1) Agoda 파트너 허브 접속: https://partners.agoda.com/tools/hotelData',
+      '  2) "Download Hotel Data" 버튼 우클릭 → "링크 주소 복사"',
+      '  3) .env.local에 추가:',
+      '     AGODA_HOTELDATA_URL=https://xml.agoda.com/hoteldatafiles/...zip?token=...',
+      '',
+      '⚠  URL은 수 주 후 만료됩니다. 만료 시 재설정이 필요합니다.',
+    ].join('\n');
+    console.error(guide);
+    writeFailLog('AGODA_HOTELDATA_URL 미설정');
+    await notifyTelegram('⚠ Tripprice hoteldata-sync: AGODA_HOTELDATA_URL 미설정 — 파트너 허브에서 URL 갱신 후 .env.local 업데이트 필요');
+    process.exit(1);
+  }
+
+  // ── dry-run: 네트워크 요청 없이 경로만 출력 ──────────────────────────────
+  if (DRY_RUN) {
+    let safeUrl = hotelDataUrl;
+    try {
+      const u = new URL(hotelDataUrl);
+      safeUrl = `${u.protocol}//${u.hostname}${u.pathname}${u.search.length > 1 ? '?[params]' : ''}`;
+    } catch {}
+    console.log(`  [dry-run] URL    : ${safeUrl}`);
+    console.log(`  [dry-run] zip 경로: ${path.relative(ROOT, zipPath)}`);
+    console.log(`  [dry-run] latest : ${path.relative(ROOT, LATEST_CSV)}`);
+    console.log('\n[dry-run] 완료 — 실제 다운로드 없음');
+    process.exit(0);
+  }
+
   // ── 중복 실행 방지 (이번 주차 이미 완료 → skip) ──────────────────────────
-  if (!DRY_RUN && !FORCE) {
+  if (!FORCE) {
     const csvInWeek = fs.existsSync(weekDir)
       ? fs.readdirSync(weekDir).find(f => f.toLowerCase().endsWith('.csv'))
       : null;
@@ -517,43 +379,12 @@ function runIngest(csvPath) {
     console.log('  기존 zip 삭제 (--force)');
   }
 
-  // ── dry-run + Mode B 자격증명 없는 경우: 경로만 출력 ────────────────────
-  if (DRY_RUN && !hotelDataUrl) {
-    const email = process.env.AGODA_PARTNER_EMAIL || '';
-    if (!email) {
-      console.log('  [dry-run] URL 방식: Playwright (Mode B)');
-      console.log(`  [dry-run] zip 경로: ${path.relative(ROOT, zipPath)}`);
-      console.log(`  [dry-run] latest  : ${path.relative(ROOT, LATEST_CSV)}`);
-      console.log('');
-      console.log('  AGODA_PARTNER_EMAIL/PASSWORD 또는 AGODA_HOTELDATA_URL 설정 후');
-      console.log('  Playwright로 링크를 자동 추출합니다.');
-      console.log('\n[dry-run] 완료');
-      process.exit(0);
-    }
-  }
+  // ── 다운로드 ─────────────────────────────────────────────────────────────
+  await downloadDirect(hotelDataUrl, weekDir, zipPath);
 
-  // ── A 또는 B: 다운로드 ───────────────────────────────────────────────────
-  let downloaded;
-  if (hotelDataUrl) {
-    downloaded = await downloadDirect(hotelDataUrl, weekDir, zipPath);
-  } else {
-    downloaded = await downloadViaPlaywright(weekDir, zipPath);
-  }
-
-  // dry-run: 여기서 종료
-  if (DRY_RUN || !downloaded) {
-    console.log('\n[dry-run] 완료 — 실제 다운로드 없음');
-    process.exit(0);
-  }
-
-  // ── ZIP 크기 확인 ──────────────────────────────────────────────────────────
   const zipStat   = fs.statSync(zipPath);
   const zipSizeMB = (zipStat.size / 1024 / 1024).toFixed(1);
   console.log(`  zip 크기: ${zipSizeMB}MB`);
-
-  if (zipStat.size < 1024) {
-    throw new Error(`zip 파일이 너무 작음 (${zipStat.size}bytes) — 다운로드 실패 가능성`);
-  }
 
   // ── 압축 해제 ─────────────────────────────────────────────────────────────
   const csvPath = extractCsv(zipPath, weekDir);
@@ -587,7 +418,9 @@ function runIngest(csvPath) {
   console.log(`  latest   : ${path.relative(ROOT, LATEST_CSV)}`);
   console.log(`  주차     : ${weekLabel}`);
   console.log('══════════════════════════════════════════════════');
-})().catch(err => {
+})().catch(async err => {
   console.error(`\n실패: ${err.message}`);
+  writeFailLog(err.message);
+  await notifyTelegram(`⚠ Tripprice hoteldata-sync 실패: ${err.message.slice(0, 300)}`);
   process.exit(1);
 });
