@@ -17,6 +17,8 @@
     "schedule:jobs":    "node scripts/scheduler-generate-jobs.js",
     "report:download":  "node scripts/_run-with-env.js scripts/agoda-report-download.js",
     "report:monthly":   "node scripts/_run-with-env.js scripts/agoda-report-parse.js",
+    "cost:fetch":       "node scripts/_run-with-env.js scripts/aws-cost-fetch.js",
+    "cost:update":      "node scripts/_run-with-env.js scripts/aws-cost-fetch.js --update-env",
     "test":             "node scripts/test-wp-publish.js && node scripts/test-process-images.js && node scripts/test-build-wp-post.js && node scripts/test-fetch-download.js"
   },
   "dependencies": {
