@@ -97,12 +97,16 @@ function fetchFromApi(agodaHotelId) {
   const url = `https://contentapi.agoda.com/api/v1/properties/${agodaHotelId}?languageCode=ko-KR`;
 
   return new Promise((resolve) => {
+    const siteUrl = process.env.SITE_URL || 'https://tripprice.net';
     const req = https.get(url, {
       headers: {
         'Authorization': `apikey ${API_KEY}`,
         'Accept':        'application/json',
         'X-Site-ID':     CID,
-        'User-Agent':    'TrippriceBot/1.0 (+https://tripprice.net)',
+        'User-Agent':    `TrippriceBot/1.0 (+${siteUrl})`,
+        'Origin':        siteUrl,
+        'Referer':       `${siteUrl}/`,
+        'X-Forwarded-Host': new URL(siteUrl).hostname,
       },
     }, res => {
       // 도메인 미승인 = www.agoda.com으로 리다이렉트

@@ -19,6 +19,8 @@
     "report:monthly":   "node scripts/_run-with-env.js scripts/agoda-report-parse.js",
     "cost:fetch":       "node scripts/_run-with-env.js scripts/aws-cost-fetch.js",
     "cost:update":      "node scripts/_run-with-env.js scripts/aws-cost-fetch.js --update-env",
+    "smoke:zai":        "node scripts/_run-with-env.js scripts/_smoke-zai.js",
+    "smoke:wp":         "node scripts/_run-with-env.js scripts/_smoke-wp-post.js",
     "test":             "node scripts/test-wp-publish.js && node scripts/test-process-images.js && node scripts/test-build-wp-post.js && node scripts/test-fetch-download.js"
   },
   "dependencies": {

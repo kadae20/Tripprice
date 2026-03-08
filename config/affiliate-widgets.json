@@ -1,0 +1,50 @@
+{
+  "_comment": "Agoda 파트너 위젯 on/off 설정. build-wp-post.js가 읽어 본문에 삽입합니다.",
+  "_cid": "1926938",
+
+  "search_box": {
+    "enabled": true,
+    "position": "after_intro",
+    "html": "<div class=\"agoda-search-widget\"><script async src=\"https://www.agoda.com/search-widget/js/widget.js\" data-cid=\"1926938\" data-lang=\"ko-KR\" data-checkIn=\"\" data-checkOut=\"\" data-cityId=\"\" data-theme=\"minimal\"></script><noscript><a href=\"https://www.agoda.com/?cid=1926938\" rel=\"nofollow sponsored\">아고다에서 호텔 검색하기</a></noscript></div>"
+  },
+
+  "text_link_cta": {
+    "enabled": true,
+    "template": "<p class=\"agoda-cta\"><a href=\"https://www.agoda.com/hotel/{agodaHotelId}?cid=1926938&tag={hotelId}\" rel=\"nofollow sponsored\" target=\"_blank\">{hotelName} 현재 가격 확인하기 →</a></p>"
+  },
+
+  "image_link": {
+    "enabled": false,
+    "comment": "파트너 센터 > 이미지 링크 탭에서 발급한 배너 코드를 html 필드에 붙여넣으세요",
+    "html": ""
+  },
+
+  "banner_120x600": {
+    "enabled": false,
+    "comment": "파트너 센터 > 배너 > 120x600 코드",
+    "html": ""
+  },
+
+  "map_widget": {
+    "enabled": false,
+    "comment": "파트너 센터 > 지도 위젯 코드. 호텔 위/경도 필요.",
+    "html": ""
+  },
+
+  "affiliate_notice": {
+    "enabled": true,
+    "text": "이 글에는 아고다 파트너 링크가 포함되어 있습니다. 링크를 통해 예약하시면 추가 비용 없이 운영에 도움이 됩니다.",
+    "position": "before_first_cta"
+  },
+
+  "price_disclaimer": {
+    "enabled": true,
+    "text": "가격·혜택·환불 규정은 시기에 따라 변동될 수 있으며, 최종 조건은 예약 페이지에서 직접 확인하시기 바랍니다.",
+    "position": "post_footer"
+  },
+
+  "_roadmap": {
+    "agoda_property_data_file": "Agoda 파트너 센터 > 숙소 데이터 파일(CSV/XML) → data/hotels/ 입력 유틸(scripts/ingest-agoda-feed.js)로 병합. 현재 미구현 — 로드맵 항목.",
+    "wp_plugin": "Agoda WordPress 공식 플러그인(검색창/예약 위젯)을 EasyWP에 설치하면 PHP 위젯 직접 사용 가능. 현재는 HTML 삽입 방식으로 대체."
+  }
+}
