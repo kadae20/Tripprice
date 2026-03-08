@@ -257,6 +257,17 @@ async function downloadViaPlaywright(weekDir, zipPath) {
   try {
     playwright = require('playwright');
   } catch {
+    if (DRY_RUN) {
+      // dry-run 시 Playwright 없어도 경로 정보만 출력하고 종료
+      console.log('  [dry-run] URL 방식: Playwright (Mode B, playwright 미설치)');
+      console.log(`  [dry-run] zip 경로: ${path.relative(ROOT, zipPath)}`);
+      console.log(`  [dry-run] latest  : ${path.relative(ROOT, LATEST_CSV)}`);
+      console.log('');
+      console.log('  실제 실행 전 설치:');
+      console.log('    npm install --save-dev playwright');
+      console.log('    npx playwright install chromium');
+      return false;
+    }
     throw new Error(
       'playwright 미설치:\n  npm install --save-dev playwright\n  npx playwright install chromium'
     );
