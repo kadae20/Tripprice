@@ -95,11 +95,45 @@ Persistent=true
 WantedBy=timers.target
 UNIT
 
+# ── tripprice-hoteldata (매주 월 03:30 KST = 일 18:30 UTC) ──────────────────
+# Agoda 호텔 데이터 파일(zip) 주간 동기화 + ingest
+# 사전 요건: unzip 설치 (sudo apt install unzip -y)
+#            .env.local에 AGODA_HOTELDATA_URL 또는 AGODA_PARTNER_{EMAIL,PASSWORD} 설정
+sudo tee /etc/systemd/system/tripprice-hoteldata.service > /dev/null << UNIT
+[Unit]
+Description=Tripprice Agoda 호텔 데이터 주간 동기화
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=$REPO_DIR
+ExecStart=$NODE_BIN scripts/_run-with-env.js scripts/agoda-hoteldata-sync.js
+StandardOutput=append:$REPO_DIR/logs/hoteldata-sync.log
+StandardError=append:$REPO_DIR/logs/hoteldata-sync.log
+TimeoutStartSec=3600
+UNIT
+
+sudo tee /etc/systemd/system/tripprice-hoteldata.timer > /dev/null << UNIT
+[Unit]
+Description=Tripprice 호텔 데이터 주간 동기화 (월 03:30 KST)
+
+[Timer]
+OnCalendar=Sun *-*-* 18:30:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
+UNIT
+
 # ── 활성화 ────────────────────────────────────────────────────────────────────
 sudo systemctl daemon-reload
 sudo systemctl enable --now tripprice-schedule.timer
 sudo systemctl enable --now tripprice-newsroom-daily.timer
 sudo systemctl enable --now tripprice-newsroom-monthly.timer
+sudo systemctl enable --now tripprice-hoteldata.timer
 
 echo ""
 echo "=== systemd 타이머 등록 완료 ==="
@@ -107,4 +141,6 @@ sudo systemctl list-timers --all | grep tripprice || true
 echo ""
 echo "로그 확인:"
 echo "  journalctl -u tripprice-newsroom-daily.service -f"
+echo "  journalctl -u tripprice-hoteldata.service -f"
 echo "  tail -f $REPO_DIR/logs/newsroom-daily.log"
+echo "  tail -f $REPO_DIR/logs/hoteldata-sync.log"

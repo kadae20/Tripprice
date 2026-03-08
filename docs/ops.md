@@ -99,6 +99,74 @@ node scripts/_run-with-env.js scripts/pipeline.js --hotels=grand-hyatt-seoul
 node scripts/approval-gate.js --slug=grand-hyatt-seoul-2026-03-07
 ```
 
+## 호텔 데이터 파일 주간 갱신
+
+Agoda 파트너 허브에서 받은 zip 파일을 주 1회 자동 동기화합니다.
+
+### 사전 준비 (EC2 최초 1회)
+
+```bash
+sudo apt install unzip -y
+```
+
+`.env.local`에 다음 중 하나 설정:
+
+```bash
+# 방법 A: 직접 URL (빠름, Playwright 불필요)
+AGODA_HOTELDATA_URL=https://xml.agoda.com/hoteldatafiles/…?token=…
+
+# 방법 B: 자격증명 (Playwright 자동 추출)
+AGODA_PARTNER_EMAIL=your@email.com
+AGODA_PARTNER_PASSWORD=yourpassword
+```
+
+선택 변수:
+```bash
+HOTELDATA_KEEP=2        # 보관 주차 수 (기본 2)
+HOTELDATA_DIR=downloads/agoda/hoteldata  # 저장 경로 (기본값)
+```
+
+### 수동 실행
+
+```bash
+# dry-run: 링크 확인 / 경로만 출력 (실제 다운로드 없음)
+node scripts/_run-with-env.js scripts/agoda-hoteldata-sync.js --dry-run
+
+# 실제 실행
+npm run hoteldata:sync
+
+# 강제 재다운로드 (이번 주차 이미 존재해도 재실행)
+node scripts/_run-with-env.js scripts/agoda-hoteldata-sync.js --force
+```
+
+### 결과물
+
+| 경로 | 내용 |
+|------|------|
+| `downloads/agoda/hoteldata/YYYY-WNN/hoteldata.zip` | 원본 zip (최근 2주 보관) |
+| `downloads/agoda/hoteldata/YYYY-WNN/hoteldata.csv` | 압축 해제 CSV |
+| `data/hotels/hotels-latest.csv` | 항상 최신 CSV (원자적 교체) |
+| `data/processed/*.json` | ingest 결과 (호텔별) |
+
+### 자동 타이머 (systemd)
+
+```
+tripprice-hoteldata.timer  매주 월요일 03:30 KST (일 18:30 UTC)
+```
+
+로그 확인:
+```bash
+tail -f /home/ubuntu/tripprice/logs/hoteldata-sync.log
+journalctl -u tripprice-hoteldata.service -f
+```
+
+타이머 상태 확인:
+```bash
+systemctl list-timers | grep hoteldata
+```
+
+---
+
 ## 작업 목록 수정
 
 `config/daily-jobs.json` 편집:
