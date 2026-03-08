@@ -44,6 +44,8 @@ const ROOT          = path.resolve(__dirname, '..');
 const HOTELDATA_DIR = path.join(ROOT, process.env.HOTELDATA_DIR || 'downloads/agoda/hoteldata');
 const LATEST_CSV    = path.join(ROOT, 'data', 'hotels', 'hotels-latest.csv');
 const KEEP          = Math.max(1, parseInt(process.env.HOTELDATA_KEEP || '2', 10));
+const STORAGE_PATH  = path.join(HOTELDATA_DIR, 'auth', 'storageState.json');
+const DEBUG_DIR     = path.join(HOTELDATA_DIR, 'debug');
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 const args = Object.fromEntries(
@@ -53,6 +55,7 @@ const args = Object.fromEntries(
 );
 const DRY_RUN   = args['dry-run'] === true;
 const FORCE     = args['force']   === true;
+const DEBUG     = args['debug']   === true;
 
 // ── ISO 주차 레이블 ───────────────────────────────────────────────────────────
 // 예: 2026-W10 (ISO 8601 주차, 월요일 기준)
@@ -242,15 +245,114 @@ async function downloadDirect(url, weekDir, zipPath) {
   return true;
 }
 
+// ── Mode B 헬퍼 ───────────────────────────────────────────────────────────────
+
+/** 쿠키배너/팝업 닫기 (없어도 계속) */
+async function dismissCookieBanner(page) {
+  try {
+    for (const kw of ['Accept', 'Agree', 'OK', '동의', 'Got it', 'Close']) {
+      const btn = await page.$(`button:has-text("${kw}"), [role="button"]:has-text("${kw}")`);
+      if (btn) { await btn.click(); await page.waitForTimeout(500); return; }
+    }
+  } catch { /* 배너 없음 — 무시 */ }
+}
+
+/** xml.agoda.com/hoteldatafiles/ zip URL 추출 (앵커 → 텍스트 정규식 순) */
+async function extractZipUrl(page) {
+  const fromAnchors = await page.evaluate(() => {
+    const m = Array.from(document.querySelectorAll('a[href]')).find(a =>
+      a.href.includes('hoteldatafiles') ||
+      (a.href.includes('agoda') && a.href.endsWith('.zip')) ||
+      a.href.endsWith('.zip')
+    );
+    return m ? m.href : '';
+  });
+  if (fromAnchors) return fromAnchors;
+
+  const text = await page.evaluate(() => document.body.innerText || '');
+  const m = text.match(/https:\/\/xml\.agoda\.com\/hoteldatafiles\/[^\s"'<>]+\.zip[^\s"'<>]*/);
+  return m ? m[0] : '';
+}
+
+/** 디버그 아티팩트 3종 저장 (시크릿 미포함) */
+async function saveDebugArtifacts(page, reason) {
+  try {
+    fs.mkdirSync(DEBUG_DIR, { recursive: true });
+    await page.screenshot({ path: path.join(DEBUG_DIR, 'login-fail.png'), fullPage: true });
+    fs.writeFileSync(path.join(DEBUG_DIR, 'login-fail.html'), await page.content(), 'utf8');
+    fs.writeFileSync(path.join(DEBUG_DIR, 'login-fail.txt'), [
+      `URL   : ${page.url()}`,
+      `TITLE : ${await page.title()}`,
+      `REASON: ${reason}`,
+      `TIME  : ${new Date().toISOString()}`,
+    ].join('\n'), 'utf8');
+    console.warn(`  ⚠  디버그 저장: ${path.relative(ROOT, DEBUG_DIR)}/login-fail.{png,html,txt}`);
+  } catch (e) {
+    console.warn(`  ⚠  디버그 저장 실패: ${e.message}`);
+  }
+}
+
+/** 로그인 수행 (SPA 렌더 대기 + Next 버튼 처리) */
+async function performLogin(page, email, password) {
+  await page.goto('https://partners.agoda.com/signin', {
+    waitUntil: 'networkidle', timeout: 30_000,
+  });
+  await dismissCookieBanner(page);
+
+  // 이메일 필드 (SPA 동적 렌더 대기)
+  const emailSel = [
+    'input[type="email"]',
+    'input[name*="email" i]',
+    'input[autocomplete="email"]',
+    'input[name*="user" i]',
+    'input[type="text"]',
+  ].join(', ');
+  await page.waitForSelector(emailSel, { timeout: 30_000 });
+  await page.fill(emailSel, email);
+
+  // Next 버튼 있으면 클릭 후 비밀번호 단계로
+  const nextBtn = await page.$([
+    'button[data-element-name="login-next"]',
+    'button:has-text("Next")',
+    'button:has-text("다음")',
+    'button:has-text("Continue")',
+  ].join(', '));
+  if (nextBtn) {
+    await nextBtn.click();
+    await page.waitForTimeout(2000);
+  }
+
+  // 비밀번호 입력
+  const pwSel = 'input[type="password"], input[name*="pass" i]';
+  await page.waitForSelector(pwSel, { timeout: 20_000 });
+  await page.fill(pwSel, password);
+
+  // 제출
+  await page.click('button[type="submit"], button[data-element-name="login-submit"], input[type="submit"]');
+  await page.waitForLoadState('networkidle', { timeout: 30_000 });
+
+  // 성공 검증 — 아직 /signin 또는 /login 경로면 실패
+  if (/\/(signin|login)/i.test(new URL(page.url()).pathname)) {
+    const errText = await page.evaluate(() => {
+      const el = document.querySelector('[role="alert"], [class*="error" i], [class*="alert" i]');
+      return el ? el.innerText.trim().slice(0, 200) : '';
+    });
+    throw new Error(`로그인 실패${errText ? ` — ${errText}` : ' — 자격증명/2FA 확인'}`);
+  }
+}
+
 // ── Mode B: Playwright 로그인 → 링크 추출 → 다운로드 ────────────────────────
+const HD_PAGES = [
+  'https://partners.agoda.com/tools/hotelData',
+  'https://partners.agoda.com/en-us/affiliates/tools/hoteldata.aspx',
+];
+
 async function downloadViaPlaywright(weekDir, zipPath) {
   const email    = process.env.AGODA_PARTNER_EMAIL    || '';
   const password = process.env.AGODA_PARTNER_PASSWORD || '';
 
   if (!email || !password) {
-    throw new Error(
-      'AGODA_PARTNER_EMAIL / AGODA_PARTNER_PASSWORD 환경변수 필요 (Mode B)'
-    );
+    throw new Error('AGODA_PARTNER_EMAIL / AGODA_PARTNER_PASSWORD 환경변수 필요 (Mode B)');
   }
 
   let playwright;
@@ -258,123 +360,81 @@ async function downloadViaPlaywright(weekDir, zipPath) {
     playwright = require('playwright');
   } catch {
     if (DRY_RUN) {
-      // dry-run 시 Playwright 없어도 경로 정보만 출력하고 종료
       console.log('  [dry-run] URL 방식: Playwright (Mode B, playwright 미설치)');
       console.log(`  [dry-run] zip 경로: ${path.relative(ROOT, zipPath)}`);
       console.log(`  [dry-run] latest  : ${path.relative(ROOT, LATEST_CSV)}`);
-      console.log('');
-      console.log('  실제 실행 전 설치:');
-      console.log('    npm install --save-dev playwright');
-      console.log('    npx playwright install chromium');
+      console.log('\n  실제 실행 전:\n    npm install --save-dev playwright\n    npx playwright install chromium');
       return false;
     }
-    throw new Error(
-      'playwright 미설치:\n  npm install --save-dev playwright\n  npx playwright install chromium'
-    );
+    throw new Error('playwright 미설치:\n  npm install --save-dev playwright\n  npx playwright install chromium');
   }
 
   console.log(`  Playwright 모드 (email: [${email.length}자], pwd: [${password.length}자])`);
 
-  const browser = await playwright.chromium.launch({ headless: true });
-  const context = await browser.newContext({ acceptDownloads: true, locale: 'ko-KR' });
+  const hasState = fs.existsSync(STORAGE_PATH);
+  const ctxOpts  = { acceptDownloads: true, locale: 'ko-KR' };
+  if (hasState) ctxOpts.storageState = STORAGE_PATH;
+
+  const browser = await playwright.chromium.launch({ headless: !DEBUG });
+  const context = await browser.newContext(ctxOpts);
   const page    = await context.newPage();
 
+  let zipUrl = '';
   try {
-    // 1) 로그인 (SPA — agoda-universal-login.js 동적 렌더링)
-    // partners.agoda.com/signin 직접 접근 후 SPA 렌더 대기
-    console.log('  로그인 중...');
-    await page.goto('https://partners.agoda.com/signin', {
-      waitUntil: 'domcontentloaded', timeout: 30_000,
-    });
-
-    // SPA가 이메일 입력창 렌더링할 때까지 대기
-    const emailSelector = 'input[type="email"], input[autocomplete="email"], input[name="email"], input[name="Email"], input[name="username"]';
-    await page.waitForSelector(emailSelector, { timeout: 30_000 });
-    await page.fill(emailSelector, email);
-
-    // 일부 SPA는 이메일 입력 후 "Next" 버튼으로 비밀번호 창 전환
-    const nextBtn = await page.$('button[data-element-name="login-next"], button:has-text("Next"), button:has-text("다음"), button:has-text("Continue")');
-    if (nextBtn) {
-      await nextBtn.click();
-      await page.waitForTimeout(1500); // SPA 전환 대기
+    // ── A) 저장된 세션으로 데이터 페이지 접근 시도 ──────────────────────────
+    if (hasState) {
+      console.log('  저장된 세션 사용 중...');
+      for (const hdUrl of HD_PAGES) {
+        await page.goto(hdUrl, { waitUntil: 'networkidle', timeout: 30_000 }).catch(() => null);
+        await dismissCookieBanner(page);
+        zipUrl = await extractZipUrl(page);
+        if (zipUrl) break;
+      }
     }
 
-    // 비밀번호 필드 대기 + 입력
-    const pwSelector = 'input[type="password"], input[name="password"], input[name="Password"]';
-    await page.waitForSelector(pwSelector, { timeout: 20_000 });
-    await page.fill(pwSelector, password);
-
-    // 제출
-    const submitSel = 'button[type="submit"], button[data-element-name="login-submit"], input[type="submit"]';
-    await page.click(submitSel);
-
-    // 네트워크 안정화 대기 (SPA 네비게이션)
-    await page.waitForLoadState('networkidle', { timeout: 30_000 });
-
-    const loginUrl = page.url();
-    // 성공 시 /signin, /login, /ul/login 모두 벗어나야 함
-    if (/\/(signin|login)/.test(new URL(loginUrl).pathname)) {
-      // 로그인 실패 가능성: 페이지에서 오류 메시지 추출
-      const errText = await page.evaluate(() => {
-        const el = document.querySelector('[class*="error"], [class*="alert"], [role="alert"]');
-        return el ? el.innerText.trim().slice(0, 120) : '';
-      });
-      throw new Error(`로그인 실패${errText ? ` — ${errText}` : ' — 자격증명 또는 2FA 확인 필요'}`);
-    }
-    console.log('  로그인 성공');
-
-    // 2) 호텔 데이터 페이지 접근 (URL 후보 순서대로 시도)
-    const hdPages = [
-      'https://partners.agoda.com/en-us/affiliates/tools/hoteldata.aspx',
-      'https://partners.agoda.com/tools/hotelData',
-      'https://partners.agoda.com/en-us/affiliates/tools.aspx',
-    ];
-
-    let zipUrl = '';
-    for (const hdUrl of hdPages) {
-      console.log(`  호텔 데이터 페이지: ${hdUrl}`);
-      await page.goto(hdUrl, { waitUntil: 'networkidle', timeout: 30_000 }).catch(() => null);
-
-      // zip 링크 탐색 (xml.agoda.com/hoteldatafiles/ 또는 .zip 포함)
-      zipUrl = await page.evaluate(() => {
-        const anchors = Array.from(document.querySelectorAll('a[href]'));
-        const match = anchors.find(a =>
-          a.href.includes('hoteldatafiles') ||
-          (a.href.includes('agoda') && a.href.endsWith('.zip')) ||
-          a.href.endsWith('.zip')
-        );
-        return match ? match.href : '';
-      });
-
-      if (zipUrl) break;
-    }
-
+    // ── B) 세션 없거나 만료 → 로그인 후 재시도 ─────────────────────────────
     if (!zipUrl) {
-      throw new Error(
-        'zip 다운로드 링크를 찾지 못했습니다.\n' +
-        '  → 페이지 구조가 변경되었거나 계정 권한이 없을 수 있습니다.\n' +
-        '  → AGODA_HOTELDATA_URL을 직접 설정하면 Playwright 없이 실행 가능합니다.'
-      );
+      console.log(hasState ? '  세션 만료 — 재로그인...' : '  로그인 중...');
+      try {
+        await performLogin(page, email, password);
+      } catch (err) {
+        await saveDebugArtifacts(page, err.message);
+        throw err;
+      }
+      console.log('  로그인 성공');
+
+      // storageState 저장 (다음 실행 시 재활용)
+      fs.mkdirSync(path.dirname(STORAGE_PATH), { recursive: true });
+      await context.storageState({ path: STORAGE_PATH });
+      console.log(`  세션 저장: ${path.relative(ROOT, STORAGE_PATH)}`);
+
+      for (const hdUrl of HD_PAGES) {
+        await page.goto(hdUrl, { waitUntil: 'networkidle', timeout: 30_000 }).catch(() => null);
+        await dismissCookieBanner(page);
+        zipUrl = await extractZipUrl(page);
+        if (zipUrl) break;
+      }
+
+      if (!zipUrl) {
+        const reason = 'zip URL 없음 — 페이지 구조 변경 또는 계정 권한 없음';
+        await saveDebugArtifacts(page, reason);
+        throw new Error(`${reason}\n  → AGODA_HOTELDATA_URL 직접 설정 권장`);
+      }
     }
 
-    // dry-run: URL만 출력, 다운로드 없음
+    // dry-run: URL만 출력
     if (DRY_RUN) {
-      const safeZipUrl = zipUrl.replace(/[?#].*$/, '?[params]');
-      console.log(`  [dry-run] 발견된 URL: ${safeZipUrl}`);
+      console.log(`  [dry-run] 발견된 URL: ${zipUrl.replace(/[?#].*$/, '?[params]')}`);
       console.log(`  [dry-run] zip 경로  : ${path.relative(ROOT, zipPath)}`);
       console.log(`  [dry-run] latest    : ${path.relative(ROOT, LATEST_CSV)}`);
       return false;
     }
 
-    // 3) 다운로드 (Playwright download API — 세션 쿠키 자동 활용)
+    // ── C) 다운로드 (Playwright download API — 세션 쿠키 자동 활용) ────────
     console.log('  zip 다운로드 중 (Playwright)...');
     fs.mkdirSync(weekDir, { recursive: true });
     const partPath = zipPath + '.part';
-
-    // 이전 .part 정리
-    if (fs.existsSync(partPath)) {
-      try { fs.unlinkSync(partPath); } catch {}
-    }
+    if (fs.existsSync(partPath)) { try { fs.unlinkSync(partPath); } catch {} }
 
     const [download] = await Promise.all([
       page.waitForEvent('download', { timeout: 300_000 }),
@@ -383,8 +443,13 @@ async function downloadViaPlaywright(weekDir, zipPath) {
     await download.saveAs(partPath);
     fs.renameSync(partPath, zipPath);
     console.log('  다운로드 완료 (Playwright)');
-
     return true;
+
+  } catch (err) {
+    if (!fs.existsSync(path.join(DEBUG_DIR, 'login-fail.png'))) {
+      await saveDebugArtifacts(page, err.message);
+    }
+    throw err;
   } finally {
     await browser.close();
   }
