@@ -97,42 +97,80 @@ function fetchFromApi(agodaHotelId) {
   const url = `https://contentapi.agoda.com/api/v1/properties/${agodaHotelId}?languageCode=ko-KR`;
 
   return new Promise((resolve) => {
-    const siteUrl = process.env.SITE_URL || 'https://tripprice.net';
+    const siteUrl  = process.env.SITE_URL || 'https://tripprice.net';
+    const hostname = (() => { try { return new URL(siteUrl).hostname; } catch { return 'tripprice.net'; } })();
+
     const req = https.get(url, {
       headers: {
-        'Authorization': `apikey ${API_KEY}`,
-        'Accept':        'application/json',
-        'X-Site-ID':     CID,
-        'User-Agent':    `TrippriceBot/1.0 (+${siteUrl})`,
-        'Origin':        siteUrl,
-        'Referer':       `${siteUrl}/`,
-        'X-Forwarded-Host': new URL(siteUrl).hostname,
+        'Authorization':    `apikey ${API_KEY}`,
+        'Accept':           'application/json',
+        'X-Site-ID':        CID,
+        'User-Agent':       `TrippriceBot/1.0 (+${siteUrl})`,
+        'Origin':           siteUrl,
+        'Referer':          `${siteUrl}/`,
+        'X-Forwarded-Host': hostname,
       },
     }, res => {
-      // 도메인 미승인 = www.agoda.com으로 리다이렉트
-      if ([301, 302, 307, 308].includes(res.statusCode)) {
-        const loc = res.headers.location || '';
+      const statusCode  = res.statusCode;
+      const contentType = res.headers['content-type'] || '';
+      const location    = res.headers['location']     || '';
+
+      // ── 리다이렉트: 파트너 허브 미승인 또는 API 키 권한 없음 ──────────────
+      if ([301, 302, 307, 308].includes(statusCode)) {
         res.resume();
-        if (loc.includes('www.agoda.com')) {
-          console.warn('  ⚠  Content API: 도메인 미승인 — tripprice.net 서버에서 실행하세요');
+        if (location.includes('www.agoda.com') || location.includes('agoda.com')) {
+          console.warn('  ⚠  Content API 진단:');
+          console.warn(`       status       : ${statusCode} Redirect`);
+          console.warn(`       location     : ${location.slice(0, 80)}`);
+          console.warn(`       SITE_URL     : ${siteUrl}`);
+          console.warn('');
+          console.warn('  → 원인 분류: 코드 문제 아님 — Agoda 파트너 허브 권한/도메인 미설정');
+          console.warn('  → 해결 방법:');
+          console.warn('       1) partners.agoda.com 로그인');
+          console.warn('       2) Tools > API > Content API 활성화 신청');
+          console.warn(`       3) Approval Sites에 "${hostname}" 등록`);
+          console.warn('       4) 승인 완료 후 --force 플래그로 재실행');
         } else {
-          console.warn(`  ⚠  Content API: 리다이렉트 → ${loc}`);
+          console.warn(`  ⚠  Content API: ${statusCode} 리다이렉트 → ${location.slice(0, 100)}`);
         }
         return resolve([]);
       }
 
-      if (res.statusCode === 401) {
+      // ── 인증 실패 ────────────────────────────────────────────────────────────
+      if (statusCode === 401 || statusCode === 403) {
         res.resume();
-        console.warn('  ⚠  Content API: 인증 실패 (AGODA_API_KEY 확인)');
+        console.warn(`  ⚠  Content API: HTTP ${statusCode} 인증/권한 오류`);
+        console.warn('       AGODA_API_KEY 형식 확인: CID:secret (예: 1926938:xxxx)');
         return resolve([]);
       }
 
-      if (res.statusCode !== 200) {
+      // ── 200이지만 HTML 응답 (투명 리다이렉트 후 agoda 홈) ───────────────────
+      if (statusCode === 200 && contentType.includes('text/html')) {
+        let d = '';
+        res.on('data', c => { if (d.length < 200) d += c; });
+        res.on('end', () => {
+          console.warn('  ⚠  Content API 진단:');
+          console.warn(`       status       : 200 OK (HTML — JSON 아님)`);
+          console.warn(`       content-type : ${contentType}`);
+          console.warn(`       body 앞 100자: ${d.slice(0, 100).replace(/\s+/g, ' ')}`);
+          console.warn('');
+          console.warn('  → 원인 분류: API 키가 Content API에 미등록되어 Agoda 홈으로 투명 리다이렉트됨');
+          console.warn('  → 해결 방법:');
+          console.warn('       1) partners.agoda.com > Tools > API > Content API 활성화');
+          console.warn(`       2) Approval Sites에 "${hostname}" 등록`);
+          resolve([]);
+        });
+        return;
+      }
+
+      // ── 기타 오류 ────────────────────────────────────────────────────────────
+      if (statusCode !== 200) {
         res.resume();
-        console.warn(`  ⚠  Content API: HTTP ${res.statusCode}`);
+        console.warn(`  ⚠  Content API: HTTP ${statusCode}`);
         return resolve([]);
       }
 
+      // ── 정상 JSON 응답 ───────────────────────────────────────────────────────
       let d = '';
       res.on('data', c => (d += c));
       res.on('end', () => {
@@ -142,6 +180,7 @@ function fetchFromApi(agodaHotelId) {
           console.log(`  → API 이미지 URL ${urls.length}개 수집`);
           resolve(urls);
         } catch {
+          console.warn('  ⚠  Content API: JSON 파싱 실패');
           resolve([]);
         }
       });
