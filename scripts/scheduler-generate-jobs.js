@@ -15,7 +15,7 @@
  * 입력:
  *   data/hotels/*.csv      — 호텔 DB
  *   state/campaigns/       — 발행 이력 (*-published.json)
- *   downloads/agoda/*/kpi.json — 월간 KPI (있으면 클릭 참고)
+ *   downloads/agoda/{월}/kpi.json — 월간 KPI (있으면 클릭 참고)
  */
 
 'use strict';
