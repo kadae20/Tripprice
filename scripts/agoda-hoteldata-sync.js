@@ -280,19 +280,46 @@ async function downloadViaPlaywright(weekDir, zipPath) {
   const page    = await context.newPage();
 
   try {
-    // 1) 로그인
+    // 1) 로그인 (SPA — agoda-universal-login.js 동적 렌더링)
+    // partners.agoda.com/signin 직접 접근 후 SPA 렌더 대기
     console.log('  로그인 중...');
-    await page.goto('https://partners.agoda.com/en-us/affiliates/login.aspx', {
-      waitUntil: 'networkidle', timeout: 30_000,
+    await page.goto('https://partners.agoda.com/signin', {
+      waitUntil: 'domcontentloaded', timeout: 30_000,
     });
-    await page.fill('input[name="Email"], input[type="email"], #email', email);
-    await page.fill('input[name="Password"], input[type="password"], #password', password);
-    await page.click('button[type="submit"], input[type="submit"], .login-btn');
-    await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 30_000 });
+
+    // SPA가 이메일 입력창 렌더링할 때까지 대기
+    const emailSelector = 'input[type="email"], input[autocomplete="email"], input[name="email"], input[name="Email"], input[name="username"]';
+    await page.waitForSelector(emailSelector, { timeout: 30_000 });
+    await page.fill(emailSelector, email);
+
+    // 일부 SPA는 이메일 입력 후 "Next" 버튼으로 비밀번호 창 전환
+    const nextBtn = await page.$('button[data-element-name="login-next"], button:has-text("Next"), button:has-text("다음"), button:has-text("Continue")');
+    if (nextBtn) {
+      await nextBtn.click();
+      await page.waitForTimeout(1500); // SPA 전환 대기
+    }
+
+    // 비밀번호 필드 대기 + 입력
+    const pwSelector = 'input[type="password"], input[name="password"], input[name="Password"]';
+    await page.waitForSelector(pwSelector, { timeout: 20_000 });
+    await page.fill(pwSelector, password);
+
+    // 제출
+    const submitSel = 'button[type="submit"], button[data-element-name="login-submit"], input[type="submit"]';
+    await page.click(submitSel);
+
+    // 네트워크 안정화 대기 (SPA 네비게이션)
+    await page.waitForLoadState('networkidle', { timeout: 30_000 });
 
     const loginUrl = page.url();
-    if (loginUrl.includes('login') || loginUrl.includes('signin')) {
-      throw new Error('로그인 실패 — 자격증명 또는 2FA 확인 필요');
+    // 성공 시 /signin, /login, /ul/login 모두 벗어나야 함
+    if (/\/(signin|login)/.test(new URL(loginUrl).pathname)) {
+      // 로그인 실패 가능성: 페이지에서 오류 메시지 추출
+      const errText = await page.evaluate(() => {
+        const el = document.querySelector('[class*="error"], [class*="alert"], [role="alert"]');
+        return el ? el.innerText.trim().slice(0, 120) : '';
+      });
+      throw new Error(`로그인 실패${errText ? ` — ${errText}` : ' — 자격증명 또는 2FA 확인 필요'}`);
     }
     console.log('  로그인 성공');
 
