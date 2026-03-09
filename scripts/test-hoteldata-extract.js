@@ -66,9 +66,10 @@ try {
   ], {
     env: {
       ...process.env,
-      HOTELDATA_LATEST_CSV: tmpLatest,
-      HOTELDATA_SUBSET_CSV: tmpSubset,
-      HOTELDATA_CITIES:     'seoul,busan,jeju',
+      HOTELDATA_LATEST_CSV:     tmpLatest,
+      HOTELDATA_SUBSET_CSV:     tmpSubset,
+      HOTELDATA_CITIES:         'seoul,busan,jeju',
+      ROTATION_COOLDOWN_DAYS:   '0',
       HOTELDATA_EXTRACT_ROWS:   '9999',
       HOTELDATA_EXTRACT_HOTELS: '9999',
     },
@@ -153,6 +154,212 @@ test('grand-hyatt-seoul.json 생성됨', () => {
 test('hilton-busan.json 생성됨', () => {
   const p = path.join(processedDir, 'hilton-busan.json');
   assert(fs.existsSync(p), `${p} 미존재`);
+});
+
+// ── 검증 C: normalizeCity / cityAliases 단위 테스트 ──────────────────────────
+console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+console.log(' [C] normalizeCity / cityAliases 단위 검증');
+console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+const {
+  normalizeCity, cityAliases, cityMatches, buildTargetCities,
+} = require('./hoteldata-extract');
+
+test('normalizeCity: 괄호 제거 ("서울 (경기)" → "서울")', () => {
+  const result = normalizeCity('서울 (경기)');
+  assert(result === '서울', `결과: "${result}"`);
+});
+
+test('normalizeCity: 슬래시 이후 제거 ("멜버른 / 멜번" → "멜버른")', () => {
+  const result = normalizeCity('멜버른 / 멜번');
+  assert(result === '멜버른', `결과: "${result}"`);
+});
+
+test('normalizeCity: 대소문자 → 소문자 ("Seoul" → "seoul")', () => {
+  const result = normalizeCity('Seoul');
+  assert(result === 'seoul', `결과: "${result}"`);
+});
+
+test('normalizeCity: 연속 공백 정리 ("Los  Angeles" → "los angeles")', () => {
+  const result = normalizeCity('Los  Angeles');
+  assert(result === 'los angeles', `결과: "${result}"`);
+});
+
+test('cityAliases: 슬래시 양쪽 모두 반환', () => {
+  const aliases = cityAliases('멜버른 / 멜번');
+  assert(
+    aliases.includes('멜버른') && aliases.includes('멜번'),
+    `기대 ["멜버른","멜번"], 실제: ${JSON.stringify(aliases)}`
+  );
+});
+
+test('cityAliases: 슬래시 없으면 1개 반환', () => {
+  const aliases = cityAliases('서울');
+  assert(aliases.length === 1 && aliases[0] === '서울', `결과: ${JSON.stringify(aliases)}`);
+});
+
+test('cityMatches: alias로 매칭 ("멜번" 타겟 → "멜버른 / 멜번" 포함)', () => {
+  const cities = buildTargetCities(['멜번']);
+  assert(cityMatches('멜버른 / 멜번', cities), '멜번 alias 매칭 실패');
+});
+
+test('cityMatches: 괄호 포함 도시명 매칭 ("서울" 타겟 → "서울 (경기)" 포함)', () => {
+  const cities = buildTargetCities(['서울']);
+  assert(cityMatches('서울 (경기)', cities), '괄호 포함 도시명 매칭 실패');
+});
+
+// ── 검증 D: Rotation 냉각 제외 ───────────────────────────────────────────────
+console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+console.log(' [D] Rotation 냉각 제외 검증');
+console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+const ROTATION_PATH = path.join(ROOT, 'state', 'rotation', 'hotel-rotation.json');
+const tmpRotSubset  = path.join(tmpDir, 'hotels-subset-rot.csv');
+
+// 기존 rotation 백업
+const rotBackup = fs.existsSync(ROTATION_PATH) ? fs.readFileSync(ROTATION_PATH, 'utf8') : null;
+
+// grand-hyatt-seoul을 1일 전 사용한 것으로 기록 (30일 냉각 → 제외 대상)
+const rotState = {
+  'grand-hyatt-seoul': {
+    last_used_at: new Date(Date.now() - 86400000).toISOString(),
+    used_count:   1,
+    last_week:    '2026-W10',
+  },
+};
+fs.mkdirSync(path.dirname(ROTATION_PATH), { recursive: true });
+fs.writeFileSync(ROTATION_PATH, JSON.stringify(rotState), 'utf8');
+
+let rotRunErr = false;
+try {
+  execFileSync(process.execPath, [path.join(SCRIPTS, 'hoteldata-extract.js')], {
+    env: {
+      ...process.env,
+      HOTELDATA_LATEST_CSV:     tmpLatest,
+      HOTELDATA_SUBSET_CSV:     tmpRotSubset,
+      HOTELDATA_CITIES:         'seoul,busan,jeju',
+      ROTATION_COOLDOWN_DAYS:   '30',
+      HOTELDATA_EXTRACT_ROWS:   '9999',
+      HOTELDATA_EXTRACT_HOTELS: '9999',
+    },
+    encoding: 'utf8',
+    timeout:  30_000,
+  });
+} catch (err) {
+  rotRunErr = true;
+  console.error('  rotation 테스트 extract 실패:', (err.stderr || err.message).slice(0, 200));
+}
+
+// rotation 파일 복원
+if (rotBackup !== null) {
+  fs.writeFileSync(ROTATION_PATH, rotBackup, 'utf8');
+} else {
+  try { fs.unlinkSync(ROTATION_PATH); } catch {}
+}
+
+test('rotation: 냉각 중 호텔(grand-hyatt-seoul) 제외됨', () => {
+  assert(!rotRunErr, 'extract 자체가 실패함');
+  assert(fs.existsSync(tmpRotSubset), 'subset 파일 미생성');
+  const content = fs.readFileSync(tmpRotSubset, 'utf8');
+  assert(!content.includes('grand-hyatt-seoul,'), 'grand-hyatt-seoul이 냉각임에도 포함됨');
+});
+
+test('rotation: 냉각 외 호텔(lotte-hotel-seoul)은 포함됨', () => {
+  assert(!rotRunErr && fs.existsSync(tmpRotSubset), 'subset 파일 없음');
+  const content = fs.readFileSync(tmpRotSubset, 'utf8');
+  assert(content.includes('lotte-hotel-seoul'), 'lotte-hotel-seoul이 미포함');
+});
+
+// ── 검증 E: global 모드 (상위 도시 자동 선택) ────────────────────────────────
+console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+console.log(' [E] global 모드 (상위 도시 자동 선택) 검증');
+console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+// seoul 행이 가장 많은 CSV: seoul×3, busan×1, jeju×1
+const GLOBAL_CSV_CONTENT = [
+  'hotel_id,hotel_name,city,country,agoda_hotel_id,content_priority',
+  'g-seoul-1,서울호텔1,seoul,korea,111,normal',
+  'g-seoul-2,서울호텔2,seoul,korea,222,normal',
+  'g-seoul-3,서울호텔3,seoul,korea,333,normal',
+  'g-busan-1,부산호텔1,busan,korea,444,normal',
+  'g-jeju-1,제주호텔1,jeju,korea,555,normal',
+].join('\n');
+
+const tmpGlobalLatest = path.join(tmpDir, 'hotels-global-latest.csv');
+const tmpGlobalSubset = path.join(tmpDir, 'hotels-global-subset.csv');
+fs.writeFileSync(tmpGlobalLatest, GLOBAL_CSV_CONTENT, 'utf8');
+
+let globalRunErr = false;
+try {
+  execFileSync(process.execPath, [path.join(SCRIPTS, 'hoteldata-extract.js')], {
+    env: {
+      ...process.env,
+      EXTRACT_MODE:             'global',
+      HOTELDATA_TOP_CITIES:     '1',
+      HOTELDATA_LATEST_CSV:     tmpGlobalLatest,
+      HOTELDATA_SUBSET_CSV:     tmpGlobalSubset,
+      ROTATION_COOLDOWN_DAYS:   '0',
+      HOTELDATA_EXTRACT_ROWS:   '9999',
+      HOTELDATA_EXTRACT_HOTELS: '9999',
+    },
+    encoding: 'utf8',
+    timeout:  30_000,
+  });
+} catch (err) {
+  globalRunErr = true;
+  console.error('  global 모드 extract 실패:', (err.stderr || err.message).slice(0, 200));
+}
+
+test('global 모드: subset.csv 생성됨', () => {
+  assert(!globalRunErr, 'extract 실패');
+  assert(fs.existsSync(tmpGlobalSubset), 'subset 파일 미생성');
+});
+
+test('global 모드: 상위 1개 도시(seoul)만 추출됨', () => {
+  assert(fs.existsSync(tmpGlobalSubset), 'subset 파일 없음');
+  const content = fs.readFileSync(tmpGlobalSubset, 'utf8');
+  assert(content.includes('g-seoul-1'), 'seoul 호텔 미포함');
+  assert(!content.includes('g-busan-1'), 'busan이 포함됨 (top 1 초과)');
+  assert(!content.includes('g-jeju-1'),  'jeju가 포함됨 (top 1 초과)');
+});
+
+// ── 검증 F: 0행 추출 시 에러 메시지 ─────────────────────────────────────────
+console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+console.log(' [F] 0행 추출 에러 메시지 검증');
+console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+const tmpZeroSubset = path.join(tmpDir, 'hotels-zero-subset.csv');
+let zeroExitCode = 0;
+let zeroOutput   = '';
+
+try {
+  execFileSync(process.execPath, [path.join(SCRIPTS, 'hoteldata-extract.js')], {
+    env: {
+      ...process.env,
+      HOTELDATA_LATEST_CSV:     tmpLatest,
+      HOTELDATA_SUBSET_CSV:     tmpZeroSubset,
+      HOTELDATA_CITIES:         'nonexistent-city-xyz',
+      ROTATION_COOLDOWN_DAYS:   '0',
+      HOTELDATA_EXTRACT_ROWS:   '9999',
+      HOTELDATA_EXTRACT_HOTELS: '9999',
+    },
+    encoding: 'utf8',
+    timeout:  30_000,
+  });
+} catch (err) {
+  zeroExitCode = err.status || 1;
+  zeroOutput   = (err.stdout || '') + (err.stderr || '');
+}
+
+test('0행: exit code 1로 종료됨', () => {
+  assert(zeroExitCode === 1, `기대 exit 1, 실제: ${zeroExitCode}`);
+});
+
+test('0행: 원인 힌트 메시지 포함 (HOTELDATA_CITIES 또는 도시 언급)', () => {
+  assert(
+    zeroOutput.includes('HOTELDATA_CITIES') || zeroOutput.includes('도시') || zeroOutput.includes('city'),
+    `힌트 미포함: ${zeroOutput.slice(0, 300)}`
+  );
 });
 
 // ── 정리 ─────────────────────────────────────────────────────────────────────
