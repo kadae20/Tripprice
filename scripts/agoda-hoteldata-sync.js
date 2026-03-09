@@ -404,46 +404,49 @@ function runIngest(csvPath) {
     process.exit(0);
   }
 
-  // ── 중복 실행 방지 (이번 주차 이미 완료 → skip) ──────────────────────────
+  // ── 다운로드 스킵 여부 결정 ──────────────────────────────────────────────
+  // 이번 주차 CSV가 이미 존재하면 다운로드만 스킵.
+  // extract → transform → ingest 는 항상 실행해 data/processed 를 갱신한다.
+  let skipDownload = false;
   if (!FORCE) {
     const csvInWeek = fs.existsSync(weekDir)
       ? fs.readdirSync(weekDir).find(f => f.toLowerCase().endsWith('.csv'))
       : null;
     if (csvInWeek && fs.existsSync(LATEST_CSV)) {
       const latestStat = fs.statSync(LATEST_CSV);
-      console.log(`  이미 ${weekLabel} 데이터 완료 (latest: ${(latestStat.size / 1024 / 1024).toFixed(1)}MB)`);
-      console.log('  건너뜀 — 재실행: --force');
-      process.exit(0);
+      console.log(`  ${weekLabel} 다운로드 이미 완료 (${(latestStat.size / 1024 / 1024).toFixed(1)}MB) — 다운로드 스킵`);
+      console.log('  extract → transform → ingest 는 계속 실행합니다. 재다운로드: --force');
+      skipDownload = true;
     }
   }
 
-  // FORCE 시 기존 zip 삭제 (재다운로드)
-  if (FORCE && fs.existsSync(zipPath)) {
-    fs.unlinkSync(zipPath);
-    console.log('  기존 zip 삭제 (--force)');
+  if (!skipDownload) {
+    // FORCE 시 기존 zip 삭제 (재다운로드)
+    if (FORCE && fs.existsSync(zipPath)) {
+      fs.unlinkSync(zipPath);
+      console.log('  기존 zip 삭제 (--force)');
+    }
+
+    // ── 다운로드 ───────────────────────────────────────────────────────────
+    await downloadDirect(hotelDataUrl, weekDir, zipPath);
+
+    const zipStat   = fs.statSync(zipPath);
+    const zipSizeMB = (zipStat.size / 1024 / 1024).toFixed(1);
+    console.log(`  zip 크기: ${zipSizeMB}MB`);
+
+    // ── 압축 해제 ──────────────────────────────────────────────────────────
+    const csvPath = extractCsv(zipPath, weekDir);
+
+    // ── 원자적 교체: hotels-latest.csv ─────────────────────────────────────
+    fs.mkdirSync(path.dirname(LATEST_CSV), { recursive: true });
+    const latestTmp = LATEST_CSV + '.tmp';
+    fs.copyFileSync(csvPath, latestTmp);
+    fs.renameSync(latestTmp, LATEST_CSV);
+    console.log(`  latest 교체: ${path.relative(ROOT, LATEST_CSV)}`);
+
+    // ── 보관 정책 ──────────────────────────────────────────────────────────
+    cleanup(HOTELDATA_DIR, KEEP);
   }
-
-  // ── 다운로드 ─────────────────────────────────────────────────────────────
-  await downloadDirect(hotelDataUrl, weekDir, zipPath);
-
-  const zipStat   = fs.statSync(zipPath);
-  const zipSizeMB = (zipStat.size / 1024 / 1024).toFixed(1);
-  console.log(`  zip 크기: ${zipSizeMB}MB`);
-
-  // ── 압축 해제 ─────────────────────────────────────────────────────────────
-  const csvPath = extractCsv(zipPath, weekDir);
-
-  // ── 원자적 교체: hotels-latest.csv ───────────────────────────────────────
-  // 1) 같은 디렉토리 내 .tmp 파일로 복사
-  // 2) .tmp → hotels-latest.csv rename (같은 디렉토리 내 → 원자적)
-  fs.mkdirSync(path.dirname(LATEST_CSV), { recursive: true });
-  const latestTmp = LATEST_CSV + '.tmp';
-  fs.copyFileSync(csvPath, latestTmp);
-  fs.renameSync(latestTmp, LATEST_CSV);
-  console.log(`  latest 교체: ${path.relative(ROOT, LATEST_CSV)}`);
-
-  // ── 보관 정책 ─────────────────────────────────────────────────────────────
-  cleanup(HOTELDATA_DIR, KEEP);
 
   // ── (a) subset 추출 ───────────────────────────────────────────────────────
   const skipExtract   = (process.env.HOTELDATA_SKIP_EXTRACT   || '').toLowerCase() === 'true';
@@ -477,17 +480,20 @@ function runIngest(csvPath) {
   }
 
   // ── 완료 요약 ─────────────────────────────────────────────────────────────
-  const latestSizeMB   = (fs.statSync(LATEST_CSV).size / 1024 / 1024).toFixed(0);
-  const subsetSizeMB   = fs.existsSync(SUBSET_CSV)
+  const latestSizeMB    = fs.existsSync(LATEST_CSV)
+    ? (fs.statSync(LATEST_CSV).size / 1024 / 1024).toFixed(0) : 'N/A';
+  const subsetSizeMB    = fs.existsSync(SUBSET_CSV)
     ? (fs.statSync(SUBSET_CSV).size / 1024 / 1024).toFixed(1) : 'N/A';
   const trippriceSizeKB = fs.existsSync(TRIPPRICE_CSV)
     ? (fs.statSync(TRIPPRICE_CSV).size / 1024).toFixed(0) + 'KB' : 'N/A';
+  const zipSizeSummary  = !skipDownload && fs.existsSync(zipPath)
+    ? (fs.statSync(zipPath).size / 1024 / 1024).toFixed(1) + 'MB' : '(스킵)';
 
   console.log('');
   console.log('══════════════════════════════════════════════════');
   console.log('  완료 요약');
   console.log('══════════════════════════════════════════════════');
-  console.log(`  zip 크기   : ${zipSizeMB}MB`);
+  console.log(`  zip 크기   : ${zipSizeSummary}`);
   console.log(`  latest     : ${path.relative(ROOT, LATEST_CSV)} (${latestSizeMB}MB)`);
   console.log(`  subset     : ${path.relative(ROOT, SUBSET_CSV)} (${subsetSizeMB}MB)`);
   console.log(`  tripprice  : ${path.relative(ROOT, TRIPPRICE_CSV)} (${trippriceSizeKB})`);
