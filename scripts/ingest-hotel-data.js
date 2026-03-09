@@ -28,6 +28,11 @@ const DIR_COVERAGE = path.join(ROOT, 'state', 'coverage');
 const DIR_CAMPAIGNS = path.join(ROOT, 'state', 'campaigns');
 
 // ──────────────────────────────────────────────
+// 실패 로그 상한 (OOM 방지)
+// ──────────────────────────────────────────────
+const MAX_FAIL_LOG = 200; // 콘솔·리포트 실패 항목 표시 상한
+
+// ──────────────────────────────────────────────
 // 필수 필드 / 선택 필드 정의
 // ──────────────────────────────────────────────
 const REQUIRED_FIELDS = ['hotel_name', 'city', 'country', 'address'];
@@ -476,8 +481,10 @@ function generateReport(results, sourceFiles) {
   }
 
   if (failed > 0) {
-    md += `## 실패 호텔 목록\n\n`;
-    for (const r of results.filter((r) => r.status === 'failed')) {
+    const failedResults = results.filter((r) => r.status === 'failed');
+    const showCount = failedResults.length; // MAX_FAIL_LOG 이하로 보관됨
+    md += `## 실패 호텔 목록 (${showCount}/${failed} 표시, 상한 ${MAX_FAIL_LOG})\n\n`;
+    for (const r of failedResults) {
       md += `### ${r.raw_name || '(이름 없음)'}\n`;
       for (const err of r.errors) {
         md += `- ❌ ${err}\n`;
@@ -486,6 +493,10 @@ function generateReport(results, sourceFiles) {
         md += `- ⚠️ ${warn}\n`;
       }
       md += '\n';
+    }
+    if (failed > showCount) {
+      md += `> ... 외 ${failed - showCount}건 생략 (상위 ${MAX_FAIL_LOG}건만 기록)\n\n`;
+      md += `> **TIP**: 대량 실패 시 \`hoteldata-to-tripprice.js\`로 사전 변환 후 재실행하세요.\n\n`;
     }
   }
 
@@ -542,6 +553,7 @@ function processFile(filePath) {
   console.log(`  읽기 완료: ${rawRecords.length}개 레코드`);
 
   const results = [];
+  let failCount = 0; // 콘솔 출력 상한 카운터
 
   for (const raw of rawRecords) {
     // 완전히 빈 레코드 건너뜀
@@ -559,13 +571,17 @@ function processFile(filePath) {
       const { errors, warnings, isValid } = validateHotel(raw);
 
       if (!isValid) {
-        results.push({
-          status: 'failed',
-          raw_name: rawName,
-          errors,
-          warnings,
-        });
-        console.log(`  ✗ ${rawName}: 필수 필드 오류 — ${errors.join(', ')}`);
+        // 실패 항목은 메모리에 상한(MAX_FAIL_LOG)까지만 보관
+        if (results.filter(r => r.status === 'failed').length < MAX_FAIL_LOG) {
+          results.push({ status: 'failed', raw_name: rawName, errors, warnings });
+        }
+        // 콘솔 출력도 상한 적용
+        if (failCount < MAX_FAIL_LOG) {
+          console.log(`  ✗ ${rawName}: 필수 필드 오류 — ${errors.join(', ')}`);
+        } else if (failCount === MAX_FAIL_LOG) {
+          console.log(`  (이후 실패 로그 생략 — 상한 ${MAX_FAIL_LOG}건, hoteldata-to-tripprice.js 먼저 실행 권장)`);
+        }
+        failCount++;
         continue;
       }
 

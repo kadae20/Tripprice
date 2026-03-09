@@ -44,6 +44,7 @@ const ROOT          = path.resolve(__dirname, '..');
 const HOTELDATA_DIR = path.join(ROOT, process.env.HOTELDATA_DIR || 'downloads/agoda/hoteldata');
 const LATEST_CSV    = path.join(ROOT, 'data', 'hotels', 'hotels-latest.csv');
 const SUBSET_CSV    = path.join(ROOT, 'data', 'hotels', 'hotels-subset.csv');
+const TRIPPRICE_CSV = path.join(ROOT, 'data', 'hotels', 'tripprice-hotels.csv');
 const KEEP          = Math.max(1, parseInt(process.env.HOTELDATA_KEEP || '1', 10));
 const LOG_PATH      = path.join(ROOT, 'logs', 'hoteldata-sync.log');
 
@@ -307,6 +308,27 @@ function runExtract() {
   }
 }
 
+// ── Agoda 원본 → Tripprice 스키마 변환 실행 ──────────────────────────────────
+function runTransform() {
+  console.log('\n  hoteldata-to-tripprice.js 실행...');
+  try {
+    const out = execFileSync(process.execPath, [
+      path.join(__dirname, 'hoteldata-to-tripprice.js'),
+    ], {
+      cwd:      ROOT,
+      env:      process.env,
+      encoding: 'utf8',
+      timeout:  300_000,
+    });
+    out.trim().split('\n').filter(Boolean).slice(-8).forEach(l => console.log(`    ${l}`));
+  } catch (err) {
+    const output = ((err.stdout || '') + (err.stderr || '')).trim();
+    console.warn(`  ⚠  transform 실패 (exit ${err.status ?? '?'})`);
+    output.split('\n').slice(-5).forEach(l => console.warn(`     ${l}`));
+    throw new Error(`hoteldata-transform 실패 (exit ${err.status ?? '?'})`);
+  }
+}
+
 // ── ingest 실행 ───────────────────────────────────────────────────────────────
 function runIngest(csvPath) {
   console.log('\n  ingest-hotel-data.js 실행...');
@@ -423,9 +445,10 @@ function runIngest(csvPath) {
   // ── 보관 정책 ─────────────────────────────────────────────────────────────
   cleanup(HOTELDATA_DIR, KEEP);
 
-  // ── subset 추출 ───────────────────────────────────────────────────────────
-  const skipExtract = (process.env.HOTELDATA_SKIP_EXTRACT || '').toLowerCase() === 'true';
-  const skipIngest  = (process.env.HOTELDATA_SKIP_INGEST  || '').toLowerCase() === 'true';
+  // ── (a) subset 추출 ───────────────────────────────────────────────────────
+  const skipExtract   = (process.env.HOTELDATA_SKIP_EXTRACT   || '').toLowerCase() === 'true';
+  const skipTransform = (process.env.HOTELDATA_SKIP_TRANSFORM || '').toLowerCase() === 'true';
+  const skipIngest    = (process.env.HOTELDATA_SKIP_INGEST    || '').toLowerCase() === 'true';
 
   if (skipExtract) {
     console.log('\n  [skip] hoteldata-extract (HOTELDATA_SKIP_EXTRACT=true)');
@@ -433,29 +456,42 @@ function runIngest(csvPath) {
     runExtract();
   }
 
-  // ── ingest 실행 (subset만) ─────────────────────────────────────────────────
+  // ── (b) Agoda 원본 → Tripprice 스키마 변환 ────────────────────────────────
+  if (skipTransform) {
+    console.log('  [skip] hoteldata-to-tripprice (HOTELDATA_SKIP_TRANSFORM=true)');
+  } else if (fs.existsSync(SUBSET_CSV)) {
+    runTransform();
+  } else {
+    console.warn('  ⚠  hotels-subset.csv 없음 — transform 건너뜀');
+  }
+
+  // ── (c) ingest 실행 (tripprice-hotels.csv만 대상) ─────────────────────────
+  // hotels-latest.csv / hotels-subset.csv 전체 ingest는 절대 하지 않음
   if (skipIngest) {
     console.log('  [skip] ingest (HOTELDATA_SKIP_INGEST=true)');
-  } else if (fs.existsSync(SUBSET_CSV)) {
-    runIngest(SUBSET_CSV);
+  } else if (fs.existsSync(TRIPPRICE_CSV)) {
+    runIngest(TRIPPRICE_CSV);
   } else {
-    console.warn('  ⚠  hotels-subset.csv 없음 — ingest 건너뜀 (HOTELDATA_SKIP_EXTRACT=true 였나요?)');
+    console.warn('  ⚠  tripprice-hotels.csv 없음 — ingest 건너뜀');
+    console.warn('  → HOTELDATA_SKIP_TRANSFORM=true 였나요? transform 단계를 확인하세요.');
   }
 
   // ── 완료 요약 ─────────────────────────────────────────────────────────────
-  const latestSizeMB = (fs.statSync(LATEST_CSV).size / 1024 / 1024).toFixed(0);
-  const subsetSizeMB = fs.existsSync(SUBSET_CSV)
-    ? (fs.statSync(SUBSET_CSV).size / 1024 / 1024).toFixed(1)
-    : 'N/A';
+  const latestSizeMB   = (fs.statSync(LATEST_CSV).size / 1024 / 1024).toFixed(0);
+  const subsetSizeMB   = fs.existsSync(SUBSET_CSV)
+    ? (fs.statSync(SUBSET_CSV).size / 1024 / 1024).toFixed(1) : 'N/A';
+  const trippriceSizeKB = fs.existsSync(TRIPPRICE_CSV)
+    ? (fs.statSync(TRIPPRICE_CSV).size / 1024).toFixed(0) + 'KB' : 'N/A';
 
   console.log('');
   console.log('══════════════════════════════════════════════════');
   console.log('  완료 요약');
   console.log('══════════════════════════════════════════════════');
-  console.log(`  zip 크기  : ${zipSizeMB}MB`);
-  console.log(`  latest    : ${path.relative(ROOT, LATEST_CSV)} (${latestSizeMB}MB)`);
-  console.log(`  subset    : ${path.relative(ROOT, SUBSET_CSV)} (${subsetSizeMB}MB)`);
-  console.log(`  주차      : ${weekLabel}`);
+  console.log(`  zip 크기   : ${zipSizeMB}MB`);
+  console.log(`  latest     : ${path.relative(ROOT, LATEST_CSV)} (${latestSizeMB}MB)`);
+  console.log(`  subset     : ${path.relative(ROOT, SUBSET_CSV)} (${subsetSizeMB}MB)`);
+  console.log(`  tripprice  : ${path.relative(ROOT, TRIPPRICE_CSV)} (${trippriceSizeKB})`);
+  console.log(`  주차       : ${weekLabel}`);
   console.log('══════════════════════════════════════════════════');
 })().catch(async err => {
   console.error(`\n실패: ${err.message}`);
