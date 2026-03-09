@@ -209,6 +209,33 @@ const postOut = run(
 
 const postFile = parseOutputFile(postOut, '.json');
 
+// ── 날짜 기반 슬러그 확정 ─────────────────────────────────────────────────────
+// build-wp-post가 생성한 JSON의 slug에 날짜 suffix가 없으면 -{today}를 추가.
+// 같은 날 중복이 있으면 -a1, -a2 suffix (wp-publish.js의 WP 사용 여부 체크와 별개).
+let finalSlug = null;
+if (postFile) {
+  const postJsonPath = require('path').join(ROOT, 'wordpress', 'drafts', postFile);
+  try {
+    const postData = JSON.parse(require('fs').readFileSync(postJsonPath, 'utf8'));
+    let slug = postData.slug || '';
+    // 날짜 suffix 없으면 추가 (YYYY-MM-DD 형식이 끝에 없는 경우)
+    if (slug && !/\d{4}-\d{2}-\d{2}(-a\d+)?$/.test(slug)) {
+      slug = `${slug}-${today}`;
+      postData.slug = slug;
+      require('fs').writeFileSync(postJsonPath, JSON.stringify(postData, null, 2), 'utf8');
+    }
+    finalSlug = slug;
+  } catch (e) {
+    // JSON 파싱 실패 시 파일명에서 추출 시도
+    finalSlug = postFile.replace(/^post-/, '').replace(/\.json$/, '');
+  }
+}
+
+// newsroom.js 가 파싱하는 마커 출력
+if (finalSlug) {
+  console.log(`슬러그(확정): ${finalSlug}`);
+}
+
 // ── 안전 모드 완료 ────────────────────────────────────────────────────────────
 console.log(`\n${divider}`);
 if (!doPublish) {

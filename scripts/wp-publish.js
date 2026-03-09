@@ -576,6 +576,40 @@ function buildPayload(data, { featuredMediaId = null, injectedContentHtml = null
 }
 
 // ──────────────────────────────────────────────
+// WP slug 중복 확인 + 내부 suffix 부여
+// ENV: WP_SLUG_CHECK=1 일 때만 활성화.
+// 중복이면 -{baseSlug}-a1, -a2, ... 를 붙여 반환.
+// ──────────────────────────────────────────────
+async function ensureUniqueWpSlug(slug, env) {
+  if (!process.env.WP_SLUG_CHECK) return slug;
+
+  // 기존 -aN suffix 제거 후 베이스 슬러그 확보
+  const base = slug.replace(/-a\d+$/, '');
+  let candidate = base;
+  let suffix = 0;
+
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const url = `${env.WP_URL}/wp-json/wp/v2/posts?slug=${encodeURIComponent(candidate)}&status=any&per_page=1`;
+    let posts;
+    try {
+      const res = await fetch(url, { headers: { Authorization: env.authHeader } });
+      if (!res.ok) break;  // API 오류 → 현재 candidate 그대로 사용
+      posts = await res.json();
+    } catch {
+      break;  // 네트워크 오류 → 진행
+    }
+    if (!Array.isArray(posts) || posts.length === 0) break;  // 사용 가능
+    suffix++;
+    candidate = `${base}-a${suffix}`;
+  }
+
+  if (candidate !== slug) {
+    console.log(`  slug 중복 감지 — 변경: ${slug} → ${candidate}`);
+  }
+  return candidate;
+}
+
+// ──────────────────────────────────────────────
 // WordPress REST API 호출
 // ──────────────────────────────────────────────
 async function publishToWP(payload, { WP_URL, authHeader }) {
@@ -773,6 +807,10 @@ async function main() {
     }
   }
 
+  // 5.8) slug 중복 확인 (WP_SLUG_CHECK=1 일 때만)
+  data.slug = await ensureUniqueWpSlug(data.slug, env);
+  console.log(`slug(확정): ${data.slug}`);
+
   // 6) 페이로드 빌드
   const payload = buildPayload(data, { featuredMediaId, injectedContentHtml, status: postStatus });
 
@@ -824,5 +862,5 @@ if (require.main === module) {
 module.exports = {
   validateInput, markdownToHTML, buildPayload,
   uploadMediaFromUrl, uploadMediaFromFile, uploadContentImages,
-  buildFigureHtml, injectImagesIntoHtml,
+  buildFigureHtml, injectImagesIntoHtml, ensureUniqueWpSlug,
 };

@@ -26,10 +26,16 @@
 const fs              = require('fs');
 const path            = require('path');
 const { execFileSync } = require('child_process');
+const rotation        = require('./rotation');
 
 const ROOT    = path.join(__dirname, '..');
 const SCRIPTS = __dirname;
 const NODE    = process.execPath;
+
+// 스모크 체크 샘플링 비율 (0.0~1.0, 기본 1.0=항상 실행)
+const SMOKE_RATE = Math.min(1, Math.max(0,
+  parseFloat(process.env.SMOKE_CHECK_SAMPLE_RATE || '1.0')
+));
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 const positional = process.argv.slice(2).filter(a => !a.startsWith('--'));
@@ -133,10 +139,13 @@ async function runDaily() {
   // 각 job 실행 함수
   function makeJobTask(job, idx) {
     return async () => {
-      const label  = job.hotels || job.hotel_ids || `job-${idx + 1}`;
-      const hotels = Array.isArray(job.hotels) ? job.hotels.join(',') : (job.hotels || '');
-      const lang   = job.lang || 'ko';
-      const jobLog = { label, hotels, lang, status: 'pending', steps: [] };
+      const label    = job.hotels || job.hotel_ids || `job-${idx + 1}`;
+      const hotels   = Array.isArray(job.hotels) ? job.hotels.join(',') : (job.hotels || '');
+      const lang     = job.lang || 'ko';
+      const jobLog   = { label, hotels, lang, status: 'pending', steps: [] };
+      // rotation key: 단독이면 hotel_id, 다중이면 comboKey
+      const hotelIds = hotels.split(',').map(h => h.trim()).filter(Boolean);
+      const rotKey   = rotation.comboKey(hotelIds);
 
       console.log(`\n[${idx + 1}/${jobs.length}] 시작: ${label}`);
 
@@ -147,8 +156,13 @@ async function runDaily() {
         return jobLog;
       }
 
+      // ── rotation: 작업 시작 기록 ──────────────────────────────────────────
+      const rotState = rotation.load();
+      rotation.markUsed(rotKey, rotState);
+      rotation.save(rotState);
+
       // STEP: pipeline (build-brief → generate-draft → images → seo-qa → build-wp-post)
-      const pipeArgs = [`--hotels=${hotels}`, `--lang=${lang}`, '--no-images'];
+      const pipeArgs   = [`--hotels=${hotels}`, `--lang=${lang}`, '--no-images'];
       const pipeResult = runScript('pipeline.js', pipeArgs, { failOk: true });
       jobLog.steps.push({ step: 'pipeline', ok: pipeResult.ok });
 
@@ -156,19 +170,27 @@ async function runDaily() {
         jobLog.status = 'pipeline-failed';
         log.summary.failed++;
         console.log(`  [${idx + 1}] FAIL: pipeline — ${label}`);
+        // rotation: 실패 기록
+        const rotSt2 = rotation.load();
+        rotation.markOutcome(rotKey, rotSt2, { success: false, failure_reason: 'pipeline-failed' });
+        rotation.save(rotSt2);
         log.jobs.push(jobLog);
         return jobLog;
       }
 
       // STEP: approval-gate
-      // slug 추출 — pipeline stdout에서 "슬러그: {slug}" 라인 파싱
-      const slugMatch  = pipeResult.stdout.match(/슬러그:\s+(\S+)/);
-      const jobSlug    = slugMatch ? slugMatch[1] : null;
+      // slug 추출 — "슬러그(확정): {slug}" 우선, 없으면 "슬러그: {slug}" 폴백
+      const slugMatch = pipeResult.stdout.match(/슬러그\(확정\):\s+(\S+)/) ||
+                        pipeResult.stdout.match(/슬러그:\s+(\S+)/);
+      const jobSlug   = slugMatch ? slugMatch[1] : null;
 
       if (!jobSlug) {
         jobLog.status = 'slug-parse-failed';
         log.summary.failed++;
         console.log(`  [${idx + 1}] FAIL: 슬러그 파싱 실패 — ${label}`);
+        const rotSt2 = rotation.load();
+        rotation.markOutcome(rotKey, rotSt2, { success: false, failure_reason: 'slug-parse-failed' });
+        rotation.save(rotSt2);
         log.jobs.push(jobLog);
         return jobLog;
       }
@@ -181,6 +203,9 @@ async function runDaily() {
         jobLog.status = 'rejected';
         log.summary.failed++;
         console.log(`  [${idx + 1}] REJECTED: ${jobSlug}`);
+        const rotSt2 = rotation.load();
+        rotation.markOutcome(rotKey, rotSt2, { success: false, slug: jobSlug, failure_reason: 'approval-rejected' });
+        rotation.save(rotSt2);
         log.jobs.push(jobLog);
         return jobLog;
       }
@@ -195,25 +220,63 @@ async function runDaily() {
           console.error(`  [${idx + 1}] --auto-publish 필요 환경변수 없음: ${missing.join(', ')}`);
           jobLog.status = 'approved-not-published';
         } else {
-          // post JSON 경로 파싱 — approval-gate 통과한 경우에만 publish
           const postMatch = pipeResult.stdout.match(/발행번들:\s+(\S+\.json)/);
           if (postMatch) {
-            // approval-gate 통과 → --status=publish 로 실제 발행
             const publishResult = runScript(
               'wp-publish.js',
               [postMatch[1], '--status=publish'],
               { failOk: true }
             );
             jobLog.steps.push({ step: 'wp-publish', ok: publishResult.ok, status: 'publish' });
+
             if (publishResult.ok) {
               log.summary.published++;
               jobLog.status = 'published';
               console.log(`  [${idx + 1}] PUBLISHED (live): ${jobSlug}`);
+
+              // ── smoke check ──────────────────────────────────────────────
+              const postIdMatch = publishResult.stdout.match(/post_id\s*:\s*(\d+)/);
+              const postId = postIdMatch ? parseInt(postIdMatch[1], 10) : null;
+              let smokeOk = true;
+              let smokeFailures = [];
+
+              if (postId && Math.random() < SMOKE_RATE) {
+                const smokeResult = runScript(
+                  'smoke-check-post.js',
+                  [`--post-id=${postId}`, `--slug=${jobSlug}`],
+                  { failOk: true }
+                );
+                jobLog.steps.push({ step: 'smoke-check', ok: smokeResult.ok });
+
+                if (!smokeResult.ok) {
+                  try {
+                    const parsed = JSON.parse(smokeResult.stdout);
+                    smokeFailures = parsed.failures || [];
+                  } catch { smokeFailures = ['parse-error']; }
+                  smokeOk = false;
+                  console.log(`  [${idx + 1}] SMOKE FAIL: ${smokeFailures.join(', ')}`);
+                }
+              }
+
+              // rotation: 성공/스모크 결과 기록
+              const rotSt2 = rotation.load();
+              if (smokeOk) {
+                rotation.markOutcome(rotKey, rotSt2, { success: true, slug: jobSlug });
+              } else {
+                rotation.markOutcome(rotKey, rotSt2, {
+                  success: false, slug: jobSlug,
+                  failure_reason: `smoke:${smokeFailures.join(',')}`,
+                });
+              }
+              rotation.save(rotSt2);
+
             } else {
-              // 실패 시 draft로 폴백 저장
               jobLog.status = 'publish-failed';
               log.summary.failed++;
               console.log(`  [${idx + 1}] PUBLISH FAIL (draft 유지): ${jobSlug}`);
+              const rotSt2 = rotation.load();
+              rotation.markOutcome(rotKey, rotSt2, { success: false, slug: jobSlug, failure_reason: 'wp-publish-failed' });
+              rotation.save(rotSt2);
             }
           } else {
             jobLog.status = 'approved-post-not-found';
@@ -221,6 +284,7 @@ async function runDaily() {
           }
         }
       } else {
+        // auto-publish 아님 → approved 상태로만 저장 (rotation 성공 기록 보류)
         jobLog.status = 'approved';
       }
 

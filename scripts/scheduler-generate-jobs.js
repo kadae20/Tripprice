@@ -20,8 +20,9 @@
 
 'use strict';
 
-const fs   = require('fs');
-const path = require('path');
+const fs       = require('fs');
+const path     = require('path');
+const rotation = require('./rotation');
 
 const ROOT = path.join(__dirname, '..');
 
@@ -98,6 +99,57 @@ function loadRecentKpiClicks() {
   return {};
 }
 
+// ── 점수 계산 ─────────────────────────────────────────────────────────────────
+
+/**
+ * 호텔 선정 우선순위 점수.
+ * 별점·리뷰·사진·priority·KPI 클릭 수를 가중 합산.
+ */
+function scoreHotel(h, kpiClicks = {}) {
+  let score = 0;
+  const star        = parseFloat(h.star_rating || h.stars || '0') || 0;
+  const reviewScore = parseFloat(h.review_score || h.rating || '0') || 0;
+  const reviewCount = parseInt(h.review_count  || h.num_reviews || '0', 10) || 0;
+  const photoCount  = parseInt(h.photo_count   || '0', 10) || 0;
+  const priority    = h.content_priority || 'normal';
+  const priceLevel  = h.price_level || '';
+
+  score += star * 5;
+  score += reviewScore * 3;
+  score += reviewCount > 0 ? Math.log10(reviewCount) * 5 : 0;
+  score += photoCount >= 5 ? 10 : 0;
+  score += priority === 'high' ? 20 : priority === 'low' ? -10 : 0;
+  score += priceLevel === 'luxury' ? 5 : 0;
+  score += (kpiClicks[h.hotel_id] || 0) * 2;
+
+  return Math.max(0.01, score);  // 최솟값 0.01 (가중 랜덤 분모 0 방지)
+}
+
+/**
+ * 가중 랜덤 샘플링 (비복원).
+ * pool / scores 배열이 1:1 대응. n개 선택.
+ */
+function weightedRandom(pool, scores, n) {
+  const result         = [];
+  const remaining      = pool.slice();
+  const remainingScores = scores.slice();
+
+  while (result.length < n && remaining.length > 0) {
+    const total = remainingScores.reduce((s, v) => s + v, 0);
+    let r = Math.random() * total;
+    let idx = remaining.length - 1;
+    for (let i = 0; i < remainingScores.length; i++) {
+      r -= remainingScores[i];
+      if (r <= 0) { idx = i; break; }
+    }
+    result.push(remaining[idx]);
+    remaining.splice(idx, 1);
+    remainingScores.splice(idx, 1);
+  }
+
+  return result;
+}
+
 // ── 호텔 그룹화 (multi-hotel 비교 vs 단독) ───────────────────────────────────
 // content_priority=high 호텔들을 city 기준으로 묶어 비교 작업 생성
 function groupHotelsByCity(hotels) {
@@ -114,9 +166,10 @@ function groupHotelsByCity(hotels) {
 const priorityOrder = { high: 0, normal: 1, low: 2 };
 
 (async () => {
-  const allHotels     = loadAllHotels();
-  const publishedMap  = loadPublishedHistory();
-  const _kpiClicks    = loadRecentKpiClicks();  // 향후 슬러그별 클릭 데이터
+  const allHotels    = loadAllHotels();
+  const publishedMap = loadPublishedHistory();
+  const kpiClicks    = loadRecentKpiClicks();
+  const rotState     = rotation.load();
 
   if (allHotels.length === 0) {
     console.error('오류: 호텔 데이터가 없습니다. data/hotels/*.csv 확인');
@@ -126,13 +179,25 @@ const priorityOrder = { high: 0, normal: 1, low: 2 };
   // active 상태만
   const activeHotels = allHotels.filter(h => h.publish_status === 'active');
 
-  // ── 신규 작업 (미발행, priority 순) ─────────────────────────────────────────
+  // ── 신규 작업 (미발행, 쿨다운 제외, 점수 기반 가중 랜덤) ──────────────────
   const unpublished = activeHotels
     .filter(h => !publishedMap[h.hotel_id])
-    .sort((a, b) => (priorityOrder[a.content_priority] ?? 1) - (priorityOrder[b.content_priority] ?? 1));
+    .filter(h => !rotation.isOnCooldown(rotation.comboKey([h.hotel_id]), rotState));
+
+  // 점수 계산 후 상위 N×3 풀에서 가중 랜덤 선택
+  const scored = unpublished.map(h => ({ hotel: h, score: scoreHotel(h, kpiClicks) }));
+  scored.sort((a, b) => b.score - a.score);
+  const poolSize = Math.min(scored.length, NEW_COUNT * 3);
+  const topPool  = scored.slice(0, poolSize);
+
+  const selectedHotels = weightedRandom(
+    topPool.map(p => p.hotel),
+    topPool.map(p => p.score),
+    poolSize,               // 최대 풀 전체를 섞어 두고 jobBuilder에서 NEW_COUNT 제한
+  );
 
   const newJobs = [];
-  const byCity  = groupHotelsByCity(unpublished);
+  const byCity  = groupHotelsByCity(selectedHotels);
 
   // 같은 city의 high-priority 호텔 2개 이상 → 비교 작업
   for (const [city, cityHotels] of Object.entries(byCity)) {
@@ -197,9 +262,14 @@ const priorityOrder = { high: 0, normal: 1, low: 2 };
   const allJobs = [...newJobs, ...refreshJobs];
 
   // ── 출력 ──────────────────────────────────────────────────────────────────
+  const onCooldown = activeHotels
+    .filter(h => !publishedMap[h.hotel_id])
+    .filter(h => rotation.isOnCooldown(rotation.comboKey([h.hotel_id]), rotState)).length;
+
   console.log(`\n작업 스케줄러 (${today})`);
   console.log(`  총: ${allJobs.length}건  (신규 ${newJobs.length} + 리프레시 ${refreshJobs.length})`);
-  console.log(`  호텔 DB: ${allHotels.length}개 (active: ${activeHotels.length}, 미발행: ${unpublished.length})`);
+  console.log(`  호텔 DB: ${allHotels.length}개 (active: ${activeHotels.length}, 미발행: ${unpublished.length + onCooldown})`);
+  console.log(`  쿨다운 제외: ${onCooldown}개 (JOB_COOLDOWN_DAYS=${rotation.COOLDOWN_DAYS})`);
   console.log(`  기발행:  ${Object.keys(publishedMap).length}개`);
 
   if (DRY_RUN) {
