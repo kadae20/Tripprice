@@ -43,7 +43,8 @@ const { execFileSync } = require('child_process');
 const ROOT          = path.resolve(__dirname, '..');
 const HOTELDATA_DIR = path.join(ROOT, process.env.HOTELDATA_DIR || 'downloads/agoda/hoteldata');
 const LATEST_CSV    = path.join(ROOT, 'data', 'hotels', 'hotels-latest.csv');
-const KEEP          = Math.max(1, parseInt(process.env.HOTELDATA_KEEP || '2', 10));
+const SUBSET_CSV    = path.join(ROOT, 'data', 'hotels', 'hotels-subset.csv');
+const KEEP          = Math.max(1, parseInt(process.env.HOTELDATA_KEEP || '1', 10));
 const LOG_PATH      = path.join(ROOT, 'logs', 'hoteldata-sync.log');
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
@@ -285,6 +286,27 @@ async function downloadDirect(url, weekDir, zipPath) {
 }
 
 
+// ── subset 추출 실행 ──────────────────────────────────────────────────────────
+function runExtract() {
+  console.log('\n  hoteldata-extract.js 실행...');
+  try {
+    const out = execFileSync(process.execPath, [
+      path.join(__dirname, 'hoteldata-extract.js'),
+    ], {
+      cwd:      ROOT,
+      env:      process.env,
+      encoding: 'utf8',
+      timeout:  600_000,
+    });
+    out.trim().split('\n').filter(Boolean).slice(-10).forEach(l => console.log(`    ${l}`));
+  } catch (err) {
+    const output = ((err.stdout || '') + (err.stderr || '')).trim();
+    console.warn(`  ⚠  extract 실패 (exit ${err.status ?? '?'})`);
+    output.split('\n').slice(-5).forEach(l => console.warn(`     ${l}`));
+    throw new Error(`hoteldata-extract 실패 (exit ${err.status ?? '?'})`);
+  }
+}
+
 // ── ingest 실행 ───────────────────────────────────────────────────────────────
 function runIngest(csvPath) {
   console.log('\n  ingest-hotel-data.js 실행...');
@@ -401,22 +423,39 @@ function runIngest(csvPath) {
   // ── 보관 정책 ─────────────────────────────────────────────────────────────
   cleanup(HOTELDATA_DIR, KEEP);
 
-  // ── ingest 실행 ───────────────────────────────────────────────────────────
-  runIngest(LATEST_CSV);
+  // ── subset 추출 ───────────────────────────────────────────────────────────
+  const skipExtract = (process.env.HOTELDATA_SKIP_EXTRACT || '').toLowerCase() === 'true';
+  const skipIngest  = (process.env.HOTELDATA_SKIP_INGEST  || '').toLowerCase() === 'true';
+
+  if (skipExtract) {
+    console.log('\n  [skip] hoteldata-extract (HOTELDATA_SKIP_EXTRACT=true)');
+  } else {
+    runExtract();
+  }
+
+  // ── ingest 실행 (subset만) ─────────────────────────────────────────────────
+  if (skipIngest) {
+    console.log('  [skip] ingest (HOTELDATA_SKIP_INGEST=true)');
+  } else if (fs.existsSync(SUBSET_CSV)) {
+    runIngest(SUBSET_CSV);
+  } else {
+    console.warn('  ⚠  hotels-subset.csv 없음 — ingest 건너뜀 (HOTELDATA_SKIP_EXTRACT=true 였나요?)');
+  }
 
   // ── 완료 요약 ─────────────────────────────────────────────────────────────
-  const rowCount = await countLines(LATEST_CSV);
-  const csvStat  = fs.statSync(LATEST_CSV);
+  const latestSizeMB = (fs.statSync(LATEST_CSV).size / 1024 / 1024).toFixed(0);
+  const subsetSizeMB = fs.existsSync(SUBSET_CSV)
+    ? (fs.statSync(SUBSET_CSV).size / 1024 / 1024).toFixed(1)
+    : 'N/A';
 
   console.log('');
   console.log('══════════════════════════════════════════════════');
   console.log('  완료 요약');
   console.log('══════════════════════════════════════════════════');
-  console.log(`  zip 크기 : ${zipSizeMB}MB`);
-  console.log(`  CSV 크기 : ${(csvStat.size / 1024 / 1024).toFixed(1)}MB`);
-  console.log(`  CSV 행 수: ${rowCount > 0 ? `${(rowCount - 1).toLocaleString()}행 (헤더 제외)` : '카운트 불가'}`);
-  console.log(`  latest   : ${path.relative(ROOT, LATEST_CSV)}`);
-  console.log(`  주차     : ${weekLabel}`);
+  console.log(`  zip 크기  : ${zipSizeMB}MB`);
+  console.log(`  latest    : ${path.relative(ROOT, LATEST_CSV)} (${latestSizeMB}MB)`);
+  console.log(`  subset    : ${path.relative(ROOT, SUBSET_CSV)} (${subsetSizeMB}MB)`);
+  console.log(`  주차      : ${weekLabel}`);
   console.log('══════════════════════════════════════════════════');
 })().catch(async err => {
   console.error(`\n실패: ${err.message}`);

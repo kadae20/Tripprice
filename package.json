@@ -17,14 +17,16 @@
     "schedule:jobs":    "node scripts/scheduler-generate-jobs.js",
     "report:download":  "node scripts/_run-with-env.js scripts/agoda-report-download.js",
     "report:monthly":   "node scripts/_run-with-env.js scripts/agoda-report-parse.js",
-    "hoteldata:sync":   "node scripts/_run-with-env.js scripts/agoda-hoteldata-sync.js",
-    "hoteldata:dry":    "node scripts/_run-with-env.js scripts/agoda-hoteldata-sync.js --dry-run --debug",
+    "hoteldata:sync":    "node scripts/_run-with-env.js scripts/agoda-hoteldata-sync.js",
+    "hoteldata:dry":     "node scripts/_run-with-env.js scripts/agoda-hoteldata-sync.js --dry-run",
+    "hoteldata:extract": "node scripts/_run-with-env.js scripts/hoteldata-extract.js",
+    "hoteldata:ingest":  "node scripts/_run-with-env.js scripts/ingest-hotel-data.js data/hotels/hotels-subset.csv",
     "data:download":    "node scripts/_run-with-env.js scripts/agoda-hotel-data-download.js",
     "cost:fetch":       "node scripts/_run-with-env.js scripts/aws-cost-fetch.js",
     "cost:update":      "node scripts/_run-with-env.js scripts/aws-cost-fetch.js --update-env",
     "smoke:zai":        "node scripts/_run-with-env.js scripts/_smoke-zai.js",
     "smoke:wp":         "node scripts/_run-with-env.js scripts/_smoke-wp-post.js",
-    "test":             "node scripts/test-wp-publish.js && node scripts/test-process-images.js && node scripts/test-build-wp-post.js && node scripts/test-fetch-download.js"
+    "test":             "node scripts/test-wp-publish.js && node scripts/test-process-images.js && node scripts/test-build-wp-post.js && node scripts/test-fetch-download.js && node scripts/test-hoteldata-extract.js"
   },
   "dependencies": {
     "sharp": "^0.33.0"
