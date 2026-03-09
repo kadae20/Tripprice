@@ -20,9 +20,13 @@
  *   node scripts/scheduler-generate-jobs.js --out=config/daily-jobs.json
  *
  * 환경변수:
- *   DAILY_JOB_COUNT      — 신규 작업 수 (기본 5, 최대 50)
+ *   DAILY_JOB_COUNT      — 신규 작업 수 (기본 50, 최대 200)
  *   SCHED_CANDIDATE_POOL — 후보 풀 상한 (기본 20000)
  *   JOB_COOLDOWN_DAYS    — rotation 쿨다운 일수 (기본 14)
+ *
+ * 쿨다운 자동 완화:
+ *   후보 수 < DAILY_JOB_COUNT/2 이면 쿨다운을 절반으로 줄여 재스트리밍.
+ *   완화 여부와 완화된 쿨다운 일수는 로그에 기록됨.
  */
 
 'use strict';
@@ -42,7 +46,7 @@ const args = Object.fromEntries(
 );
 
 const DAILY_JOB_COUNT = Math.min(
-  parseInt(process.env.DAILY_JOB_COUNT || args.new || '5', 10), 50
+  parseInt(process.env.DAILY_JOB_COUNT || args.new || '50', 10), 200
 );
 const REF_COUNT = Math.min(
   parseInt(args.refresh || '10', 10), 50
@@ -55,9 +59,42 @@ const OUT_PATH = path.resolve(ROOT, args.out || 'config/daily-jobs.json');
 const today    = new Date().toISOString().split('T')[0];
 
 // ── 경로 상수 ─────────────────────────────────────────────────────────────────
-const TRIPPRICE_CSV = path.join(ROOT, 'data', 'hotels', 'tripprice-hotels.csv');
-const PROCESSED_DIR = path.join(ROOT, 'data', 'processed');
-const COVERAGE_DIR  = path.join(ROOT, 'state', 'coverage');
+const TRIPPRICE_CSV  = path.join(ROOT, 'data', 'hotels', 'tripprice-hotels.csv');
+const PROCESSED_DIR  = path.join(ROOT, 'data', 'processed');
+const COVERAGE_DIR   = path.join(ROOT, 'state', 'coverage');
+const PLAYBOOK_PATH  = path.join(ROOT, 'config', 'editorial-playbook.json');
+const KPI_PATH       = path.join(ROOT, 'state', 'kpi', 'hotel-performance.json');
+
+// ── editorial-playbook 로드 ───────────────────────────────────────────────────
+function loadPlaybook() {
+  if (!fs.existsSync(PLAYBOOK_PATH)) return null;
+  try { return JSON.parse(fs.readFileSync(PLAYBOOK_PATH, 'utf8')); }
+  catch { return null; }
+}
+
+// post_type 가중 랜덤 선택 (playbook scheduling_weight 기준)
+function pickPostType(playbook) {
+  if (!playbook || !playbook.post_types) return 'hotel-comparison';
+  const types   = Object.entries(playbook.post_types);
+  const total   = types.reduce((s, [, t]) => s + (t.scheduling_weight || 0), 0);
+  if (total <= 0) return 'hotel-comparison';
+  let r = Math.random() * total;
+  for (const [name, t] of types) {
+    r -= (t.scheduling_weight || 0);
+    if (r <= 0) return name;
+  }
+  return types[types.length - 1][0];
+}
+
+// post_type에 맞는 호텔 수 결정
+function hotelCountForType(postType, playbook, availableCount) {
+  const def = playbook?.post_types?.[postType];
+  if (!def) return Math.min(2, availableCount);
+  const min = def.min_hotels || 1;
+  const max = def.max_hotels || 3;
+  const n   = min + Math.floor(Math.random() * (max - min + 1));
+  return Math.min(n, availableCount);
+}
 
 // ── CSV 파서 (경량, 의존성 없음) ─────────────────────────────────────────────
 function parseCsvRow(line) {
@@ -91,9 +128,18 @@ function loadPublishedHistory() {
   return map;
 }
 
-// ── KPI 클릭 데이터 ───────────────────────────────────────────────────────────
+// ── KPI 클릭 데이터 (state/kpi/hotel-performance.json) ───────────────────────
 function loadRecentKpiClicks() {
-  return {};  // 향후 슬러그별 클릭 데이터 확장 포인트
+  if (!fs.existsSync(KPI_PATH)) return {};
+  try {
+    const perf   = JSON.parse(fs.readFileSync(KPI_PATH, 'utf8'));
+    const clicks = {};
+    for (const [key, val] of Object.entries(perf)) {
+      // combo: 키 제외, 단일 hotel_id만 clicks에 포함
+      if (!key.startsWith('combo:')) clicks[key] = val.clicks || 0;
+    }
+    return clicks;
+  } catch { return {}; }
 }
 
 // ── 점수 계산 ─────────────────────────────────────────────────────────────────
@@ -142,7 +188,8 @@ function weightedRandom(pool, scores, n) {
 // ── tripprice-hotels.csv 스트리밍 후보 로드 ──────────────────────────────────
 // readline 스트리밍: CANDIDATE_POOL 개 채워지면 즉시 스트림 종료 (OOM 방지).
 // 각 행에서 필터 5개를 인라인 적용 — 통과한 것만 candidates 배열에 추가.
-async function streamCandidateHotels(publishedMap, rotState) {
+// cooldownDaysOverride: 쿨다운 완화 시 기본값 대신 이 값을 사용
+async function streamCandidateHotels(publishedMap, rotState, cooldownDaysOverride) {
   if (!fs.existsSync(TRIPPRICE_CSV)) return [];
 
   return new Promise((resolve, reject) => {
@@ -201,8 +248,14 @@ async function streamCandidateHotels(publishedMap, rotState) {
       // [4] 미발행
       if (publishedMap[hotelId]) return;
 
-      // [5] 쿨다운 아님
-      if (rotation.isOnCooldown(rotation.comboKey([hotelId]), rotState)) return;
+      // [5] 쿨다운 아님 (override 있으면 직접 계산)
+      if (cooldownDaysOverride !== undefined) {
+        const e = rotState[rotation.comboKey([hotelId])];
+        if (cooldownDaysOverride > 0 && e && e.last_used_at) {
+          const elapsed = (Date.now() - new Date(e.last_used_at).getTime()) / 86400000;
+          if (elapsed < cooldownDaysOverride) return;
+        }
+      } else if (rotation.isOnCooldown(rotation.comboKey([hotelId]), rotState)) return;
 
       candidates.push(h);
     });
@@ -259,15 +312,28 @@ function diagnoseCandidateZero(publishedCount, rotState) {
   const publishedMap = loadPublishedHistory();
   const kpiClicks    = loadRecentKpiClicks();
   const rotState     = rotation.load();
+  const playbook     = loadPlaybook();
 
   console.log(`\n작업 스케줄러 (${today})`);
   console.log(`  후보 풀 상한  : ${CANDIDATE_POOL}`);
   console.log(`  목표 작업 수  : 신규 ${DAILY_JOB_COUNT} + 리프레시 ${REF_COUNT}`);
   console.log(`  쿨다운        : ${rotation.COOLDOWN_DAYS}일`);
+  if (playbook) console.log(`  playbook      : 로드 완료 (${Object.keys(playbook.post_types || {}).length}개 유형)`);
   console.log('  후보 로딩 중 (스트리밍)...');
 
-  const candidates = await streamCandidateHotels(publishedMap, rotState);
-  console.log(`  후보          : ${candidates.length}개`);
+  let candidates = await streamCandidateHotels(publishedMap, rotState);
+  let cooldownRelaxed = false;
+
+  // 쿨다운 자동 완화: 후보 부족 시 쿨다운 절반으로 줄여 재스트리밍
+  if (candidates.length < Math.max(DAILY_JOB_COUNT / 2, 1) && rotation.COOLDOWN_DAYS > 0) {
+    const relaxedDays = Math.floor(rotation.COOLDOWN_DAYS / 2);
+    console.log(`  ⚠  후보 ${candidates.length}개 — 쿨다운 완화 ${rotation.COOLDOWN_DAYS}일 → ${relaxedDays}일로 재스트리밍`);
+    candidates      = await streamCandidateHotels(publishedMap, rotState, relaxedDays);
+    cooldownRelaxed = true;
+    console.log(`  (완화 후) 후보: ${candidates.length}개`);
+  } else {
+    console.log(`  후보          : ${candidates.length}개`);
+  }
 
   if (candidates.length === 0) {
     diagnoseCandidateZero(Object.keys(publishedMap).length, rotState);
@@ -286,7 +352,7 @@ function diagnoseCandidateZero(publishedCount, rotState) {
     poolSize,
   );
 
-  // ── 비교 작업 (같은 city, high-priority 2개 이상) ─────────────────────────
+  // ── playbook post_type 혼합 선택으로 신규 작업 생성 ────────────────────────
   const newJobs    = [];
   const usedInJob  = new Set();
   const usedCombos = new Set();    // comboKey 중복 방지
@@ -298,34 +364,51 @@ function diagnoseCandidateZero(publishedCount, rotState) {
     byCity[c].push(h);
   }
 
+  // 비교/neighborhood/seasonal/persona 유형: 같은 city에서 복수 호텔
   for (const [city, cityHotels] of Object.entries(byCity)) {
     if (newJobs.length >= DAILY_JOB_COUNT) break;
-    const highs = cityHotels.filter(h => h.content_priority === 'high' && !usedInJob.has(h.hotel_id));
-    if (highs.length >= 2) {
-      const pick     = highs.slice(0, 3);
+    const available = cityHotels.filter(h => !usedInJob.has(h.hotel_id));
+    if (available.length < 2) continue;
+
+    const postType = pickPostType(playbook);
+    const def      = playbook?.post_types?.[postType];
+    const needMulti = !def || (def.min_hotels || 1) >= 2;
+
+    if (needMulti) {
+      const count    = hotelCountForType(postType, playbook, available.length);
+      const pick     = available.slice(0, count);
+      if (pick.length < (def?.min_hotels || 2)) continue;
       const comboKey = rotation.comboKey(pick.map(h => h.hotel_id));
       if (usedCombos.has(comboKey)) continue;
       usedCombos.add(comboKey);
       pick.forEach(h => usedInJob.add(h.hotel_id));
       newJobs.push({
-        hotels: pick.map(h => h.hotel_id).join(','),
-        lang:   'ko',
-        note:   `${city} 럭셔리 비교 (신규)`,
-        type:   'new',
+        hotels:    pick.map(h => h.hotel_id).join(','),
+        lang:      'ko',
+        post_type: postType,
+        note:      `${city} ${postType} (신규)${cooldownRelaxed ? ' [쿨다운완화]' : ''}`,
+        type:      'new',
       });
     }
   }
 
-  // ── 단독 리뷰 (selected 중 미사용, 서로 다른 hotel_id 보장) ─────────────
+  // ── 단독 리뷰 (hotel-review 또는 미사용 호텔) ────────────────────────────
   for (const h of selected) {
     if (newJobs.length >= DAILY_JOB_COUNT) break;
     if (usedInJob.has(h.hotel_id)) continue;
     usedInJob.add(h.hotel_id);
+    // 단독 유형은 hotel-review 또는 playbook에서 min_hotels=1 인 것
+    const soloType = playbook ? (() => {
+      const soloTypes = Object.entries(playbook.post_types || {})
+        .filter(([, t]) => (t.min_hotels || 1) === 1 && (t.max_hotels || 1) === 1);
+      return soloTypes.length > 0 ? soloTypes[Math.floor(Math.random() * soloTypes.length)][0] : 'hotel-review';
+    })() : 'hotel-review';
     newJobs.push({
-      hotels: h.hotel_id,
-      lang:   'ko',
-      note:   `${h.hotel_name || h.hotel_id} 단독 리뷰 (신규)`,
-      type:   'new',
+      hotels:    h.hotel_id,
+      lang:      'ko',
+      post_type: soloType,
+      note:      `${h.hotel_name || h.hotel_id} ${soloType} (신규)${cooldownRelaxed ? ' [쿨다운완화]' : ''}`,
+      type:      'new',
     });
   }
 
@@ -361,6 +444,7 @@ function diagnoseCandidateZero(publishedCount, rotState) {
 
   console.log(`  신규: ${newJobs.length} / 리프레시: ${refreshJobs.length} / 총: ${allJobs.length}`);
   console.log(`  기발행: ${Object.keys(publishedMap).length} / 쿨다운 키: ${onCooldown}`);
+  if (cooldownRelaxed) console.log(`  ⚠  쿨다운 완화 적용됨 — 기록 유의`);
 
   if (DRY_RUN) {
     console.log('\n[DRY-RUN] 생성될 작업:');
@@ -379,6 +463,7 @@ function diagnoseCandidateZero(publishedCount, rotState) {
   const outDir = path.dirname(OUT_PATH);
   if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
 
+  // post_type 유지, 내부 필드(type/original_slug)는 제거
   const saveJobs = allJobs.map(({ type, original_slug, ...j }) => j);
   fs.writeFileSync(OUT_PATH, JSON.stringify(saveJobs, null, 2), 'utf8');
 

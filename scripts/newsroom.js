@@ -37,6 +37,38 @@ const SMOKE_RATE = Math.min(1, Math.max(0,
   parseFloat(process.env.SMOKE_CHECK_SAMPLE_RATE || '1.0')
 ));
 
+// ── KPI 훅: 발행 성공 시 hotel-performance.json 갱신 ─────────────────────────
+function updateHotelPerformance(hotelIds, slug) {
+  const kpiPath = path.join(ROOT, 'state', 'kpi', 'hotel-performance.json');
+  const kpiDir  = path.dirname(kpiPath);
+  if (!fs.existsSync(kpiDir)) fs.mkdirSync(kpiDir, { recursive: true });
+
+  let perf = {};
+  try { perf = JSON.parse(fs.readFileSync(kpiPath, 'utf8')); } catch {}
+
+  const now = new Date().toISOString().split('T')[0];
+  for (const hotelId of hotelIds) {
+    if (!perf[hotelId]) perf[hotelId] = { published_count: 0, slugs: [], clicks: 0 };
+    perf[hotelId].published_count++;
+    perf[hotelId].last_published_at = now;
+    perf[hotelId].last_slug         = slug;
+    if (!perf[hotelId].slugs.includes(slug)) perf[hotelId].slugs.push(slug);
+  }
+
+  // 다중 호텔 조합 키도 기록 (scheduler의 scoreHotel KPI 부스트용)
+  if (hotelIds.length > 1) {
+    const comboKey = 'combo:' + hotelIds.slice().sort().join('|');
+    if (!perf[comboKey]) perf[comboKey] = { published_count: 0, slugs: [], clicks: 0 };
+    perf[comboKey].published_count++;
+    perf[comboKey].last_published_at = now;
+    perf[comboKey].last_slug         = slug;
+    if (!perf[comboKey].slugs.includes(slug)) perf[comboKey].slugs.push(slug);
+  }
+
+  try { fs.writeFileSync(kpiPath, JSON.stringify(perf, null, 2), 'utf8'); }
+  catch { /* KPI 갱신 실패는 무시 */ }
+}
+
 // ── CLI ───────────────────────────────────────────────────────────────────────
 const positional = process.argv.slice(2).filter(a => !a.startsWith('--'));
 const flags      = Object.fromEntries(
@@ -233,6 +265,9 @@ async function runDaily() {
               log.summary.published++;
               jobLog.status = 'published';
               console.log(`  [${idx + 1}] PUBLISHED (live): ${jobSlug}`);
+
+              // ── KPI 훅: hotel-performance.json 갱신 ───────────────────────
+              updateHotelPerformance(hotelIds, jobSlug);
 
               // ── smoke check ──────────────────────────────────────────────
               const postIdMatch = publishResult.stdout.match(/post_id\s*:\s*(\d+)/);

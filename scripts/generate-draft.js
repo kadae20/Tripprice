@@ -527,6 +527,9 @@ function validateAiBody(text) {
   if (!/##\s*(자주\s*묻는|FAQ)/i.test(text))           return false;
   if (!/현재\s*가격\s*확인하기/.test(text))             return false;
   if (!/가격·혜택·환불/.test(text))                    return false;
+  // FAQ 3개 이상 검증
+  const faqCount = (text.match(/\*\*Q[.:]/g) || []).length;
+  if (faqCount < 3)                                    return false;
   return true;
 }
 

@@ -197,6 +197,23 @@ run(
   [`--draft=${draftId}`, '--json']
 );
 
+// ── STEP 3.5: build-internal-links (soft-fail) ────────────────────────────────
+// 내부링크 인덱스 갱신 + 초안에 실제 링크 2개 이상 삽입.
+// 실패해도 파이프라인 계속 (build-internal-links.js가 exit(0) 보장).
+try {
+  const ilLabel = doPublish ? 'STEP 3.5/5  build-internal-links' : 'STEP 3.5/4  build-internal-links';
+  const ilOut = execFileSync(NODE, [
+    path.join(SCRIPTS, 'build-internal-links.js'),
+    `--draft=${draftId}`,
+  ], { cwd: ROOT, env: process.env, encoding: 'utf8' });
+  const line = '─'.repeat(60);
+  console.log(`\n${line}\n▶  ${ilLabel}\n${line}`);
+  process.stdout.write(ilOut);
+} catch (err) {
+  process.stdout.write(err.stdout || '');
+  console.log('  ⚠  [build-internal-links] 실패 — 계속');
+}
+
 // ── STEP 4: build-wp-post ─────────────────────────────────────────────────────
 const postArgs = [`--draft=${draftId}`];
 if (withHtml) postArgs.push('--html');

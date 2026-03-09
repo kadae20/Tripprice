@@ -1,0 +1,94 @@
+{
+  "_comment": "각 post_type 정의. scheduling_weight 합계 = 100. scheduler가 이 비율로 혼합 선택.",
+  "post_types": {
+    "hotel-review": {
+      "description": "단일 호텔 심층 리뷰 — 한 호텔의 장단점·위치·가격·투숙 데이터를 집중 분석",
+      "min_hotels": 1,
+      "max_hotels": 1,
+      "required_sections": [
+        "빠른 결론 요약",
+        "이 글이 필요한 사람",
+        "선택 기준",
+        "자주 묻는 질문"
+      ],
+      "cta_rules": { "min": 1, "max": 4 },
+      "prohibited_patterns": [
+        "장점만 나열",
+        "단점 없는 리뷰",
+        "공급자 설명 복사",
+        "근거 없는 최고 단정"
+      ],
+      "scheduling_weight": 30
+    },
+    "hotel-comparison": {
+      "description": "2~3개 호텔 비교 — 판단 기준 제시 후 각 호텔이 어떤 여행자에게 맞는지 결론",
+      "min_hotels": 2,
+      "max_hotels": 3,
+      "required_sections": [
+        "빠른 결론 요약",
+        "이 글이 필요한 사람",
+        "선택 기준",
+        "한눈에 비교",
+        "자주 묻는 질문"
+      ],
+      "cta_rules": { "min": 2, "max": 4 },
+      "prohibited_patterns": [
+        "도시명만 바꾼 복제",
+        "도어웨이 패턴",
+        "키워드 스터핑"
+      ],
+      "scheduling_weight": 35
+    },
+    "neighborhood-guide": {
+      "description": "동네/지역 기반 호텔 가이드 — 동선·지역 특징 중심, 3~5개 호텔 소개",
+      "min_hotels": 3,
+      "max_hotels": 5,
+      "required_sections": [
+        "이 글이 필요한 사람",
+        "지역 특징",
+        "호텔별 분석",
+        "자주 묻는 질문"
+      ],
+      "cta_rules": { "min": 2, "max": 4 },
+      "prohibited_patterns": [
+        "도시명만 바꾼 복제",
+        "도어웨이 패턴"
+      ],
+      "scheduling_weight": 15
+    },
+    "seasonal-deal": {
+      "description": "시즌·이벤트 기반 특가 가이드 — 여행 시즌·시기별 가격 변화 중심, 3~7개 호텔",
+      "min_hotels": 3,
+      "max_hotels": 7,
+      "required_sections": [
+        "이 글이 필요한 사람",
+        "시즌 정보",
+        "호텔별 분석",
+        "자주 묻는 질문"
+      ],
+      "cta_rules": { "min": 2, "max": 4 },
+      "prohibited_patterns": [
+        "허위 특가 단정",
+        "도어웨이 패턴"
+      ],
+      "scheduling_weight": 10
+    },
+    "persona-match": {
+      "description": "여행자 유형(페르소나) 맞춤 추천 — 커플/출장/가족/혼자 기준으로 최적 호텔 제안, 2~4개",
+      "min_hotels": 2,
+      "max_hotels": 4,
+      "required_sections": [
+        "이 글이 필요한 사람",
+        "페르소나별 추천",
+        "호텔별 분석",
+        "자주 묻는 질문"
+      ],
+      "cta_rules": { "min": 2, "max": 4 },
+      "prohibited_patterns": [
+        "나열형",
+        "도어웨이 패턴"
+      ],
+      "scheduling_weight": 10
+    }
+  }
+}
