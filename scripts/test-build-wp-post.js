@@ -205,23 +205,26 @@ test('알 수 없는 파일명 → null', () => {
 // ── resolveHotelImages (실제 assets/raw 사용) ─────────────────────────────────
 console.log('\n[7] resolveHotelImages\n');
 
-test('grand-hyatt-seoul raw 이미지 최대 4장 반환', () => {
+test('grand-hyatt-seoul 이미지 최소 1장 반환 (raw 없으면 폴백)', () => {
   const imgs = resolveHotelImages('grand-hyatt-seoul', '그랜드 하얏트 서울', 'seoul', 4);
   assert(Array.isArray(imgs), '배열이어야 함');
-  assert(imgs.length > 0, 'raw 이미지 최소 1장 이상');
+  assert(imgs.length >= 1, '폴백 포함 최소 1장');
   assert(imgs.length <= 4, '최대 4장 초과 안 됨');
   assert(imgs[0].local_path.startsWith('assets/'), 'local_path가 assets/로 시작');
   assert(typeof imgs[0].alt === 'string' && imgs[0].alt.length > 0, 'alt 텍스트 있어야 함');
 });
 
-test('grand-hyatt-seoul alt에 호텔명 포함', () => {
+test('grand-hyatt-seoul alt에 호텔명 포함 (raw 또는 폴백)', () => {
   const imgs = resolveHotelImages('grand-hyatt-seoul', '그랜드 하얏트 서울', 'seoul', 4);
+  assert(imgs.length >= 1, '이미지 없음');
   assert(imgs[0].alt.includes('그랜드 하얏트 서울'), 'alt에 호텔명 없음');
 });
 
-test('존재하지 않는 호텔 → 빈 배열', () => {
+test('존재하지 않는 호텔 → 폴백 1장 (featured.webp 경로)', () => {
   const imgs = resolveHotelImages('nonexistent-hotel', '존재안함', 'seoul', 4);
-  assertEqual(imgs.length, 0, '없는 호텔이면 빈 배열');
+  assertEqual(imgs.length, 1, '폴백 이미지 1장이어야 함');
+  assert(imgs[0].local_path.includes('nonexistent-hotel'), 'hotel_id가 경로에 포함');
+  assert(imgs[0].alt.length > 0, 'alt 텍스트 있어야 함');
 });
 
 test('max=2이면 최대 2장', () => {

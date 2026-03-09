@@ -246,6 +246,16 @@ function resolveHotelImages(hotelId, hotelName, city, max = 4) {
     }
     if (results.length >= max) break;
   }
+
+  // 폴백: raw/processed 이미지가 0장이면 featured.webp 경로를 반환
+  // (파일이 없어도 경로 반환 — wp-publish 단계에서 업로드 시도)
+  if (results.length === 0) {
+    results.push({
+      local_path: `assets/processed/${hotelId}/featured.webp`,
+      alt:        `${hotelName || hotelId} 대표 이미지`,
+    });
+  }
+
   return results;
 }
 
