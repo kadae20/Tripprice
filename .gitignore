@@ -52,3 +52,15 @@ state/newsroom-log-*.json
 Thumbs.db
 .idea/
 .vscode/
+
+# runtime artifacts
+state/rotation/
+state/campaigns/hoteldata-*-report-*.md
+state/newsroom-log-*.json
+state/cron.log
+
+# big data / derived
+data/hotels/hotels-latest.csv
+data/hotels/hotels-subset.csv
+data/hotels/tripprice-hotels.csv
+downloads/
