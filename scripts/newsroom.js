@@ -168,6 +168,21 @@ async function runDaily() {
     summary: { total: jobs.length, approved: 0, published: 0, failed: 0 },
   };
 
+  // ── ENRICH_LITE: 발행 전 상위 후보 OSM 보강 (선택) ──────────────────────
+  if (process.env.ENRICH_LITE === '1' && !dryRun) {
+    const ENRICH_MAX = Math.min(parseInt(process.env.ENRICH_MAX || '80', 10), 500);
+    const hotelIds = [...new Set(
+      jobs.flatMap(j => {
+        const h = typeof j.hotels === 'string' ? j.hotels : (j.hotels || '');
+        return h.split(',').map(s => s.trim()).filter(Boolean);
+      })
+    )].slice(0, ENRICH_MAX);
+    if (hotelIds.length > 0) {
+      console.log(`\n  ENRICH_LITE: ${hotelIds.length}개 호텔 위치 보강 중...`);
+      runScript('enrich-lite.js', [`--hotels=${hotelIds.join(',')}`], { failOk: true });
+    }
+  }
+
   // 각 job 실행 함수
   function makeJobTask(job, idx) {
     return async () => {

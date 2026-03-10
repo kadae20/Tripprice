@@ -33,7 +33,11 @@ const OUTPUT_HEADERS = [
   'agoda_hotel_id', 'partner_url', 'source_url',
   'star_rating', 'review_score', 'review_count', 'photos_count',
   'latitude', 'longitude',
-  'price_min', 'checkin_time', 'checkout_time',
+  'price_min', 'currency', 'checkin_time', 'checkout_time',
+  'overview', 'numberrooms', 'chain_name',
+  'photo1', 'photo2', 'photo3', 'photo4', 'photo5',
+  'rating_average', 'number_of_reviews',
+  'rates_from', 'rates_currency',
   'content_priority', 'data_source',
 ];
 
@@ -79,11 +83,34 @@ const CANDIDATES = {
                     'url', 'propertyurl', 'agoda_url'],
   // 가격/체크인
   price_min:       ['pricemin', 'price_min', 'minprice', 'min_price',
-                    'price_from', 'lowestprice'],
+                    'price_from', 'lowestprice', 'ratesfrom', 'rates_from'],
+  currency:        ['currency', 'ratescurrency', 'rates_currency'],
   checkin_time:    ['checkintime', 'checkin_time', 'checkin',
                     'check_in_time', 'check_in'],
   checkout_time:   ['checkouttime', 'checkout_time', 'checkout',
                     'check_out_time', 'check_out'],
+  // 소개글 / 객실수 / 체인
+  overview:        ['overview', 'hotel_overview', 'description', 'propertydescription',
+                    'property_description', 'hoteldescription', 'hotel_description'],
+  numberrooms:     ['numberrooms', 'number_of_rooms', 'numberofrooms', 'roomcount',
+                    'room_count', 'total_rooms', 'totalrooms'],
+  chain_name:      ['chainname', 'chain_name', 'brandname', 'brand_name',
+                    'hotelchain', 'hotel_chain'],
+  // 개별 사진 URL (photo1~5)
+  photo1:          ['photo1', 'photo_1'],
+  photo2:          ['photo2', 'photo_2'],
+  photo3:          ['photo3', 'photo_3'],
+  photo4:          ['photo4', 'photo_4'],
+  photo5:          ['photo5', 'photo_5'],
+  // 리뷰 (원본 컬럼명 그대로 추가 출력)
+  rating_average:  ['ratingaverage', 'rating_average', 'averagerating', 'review_score',
+                    'guestreviewscore', 'guest_review_score'],
+  number_of_reviews: ['numberofreviews', 'number_of_reviews', 'numberofrereviews',
+                    'reviewcount', 'review_count', 'totalreviews', 'numreviews'],
+  // 요금 원본 컬럼
+  rates_from:      ['ratesfrom', 'rates_from', 'price_from', 'min_rate',
+                    'pricemin', 'price_min', 'minprice', 'min_price', 'lowestprice'],
+  rates_currency:  ['ratescurrency', 'rates_currency', 'currency'],
 };
 
 // ── CSV 유틸 (RFC 4180) ───────────────────────────────────────────────────────
@@ -298,6 +325,35 @@ async function main() {
         missingFieldCount[k] = (missingFieldCount[k] || 0) + 1;
       }
 
+      // photo1~5: 개별 컬럼에서 가져오거나, photos JSON 배열 파싱 시도
+      const photoVals = [1, 2, 3, 4, 5].map(n => get(`photo${n}`));
+      // photos JSON 배열 폴백: photo1~5가 모두 비어있고 photos 컬럼이 JSON 배열이면 파싱
+      if (photoVals.every(v => !v)) {
+        const photosCol = Object.keys(colMap).find(k => k === 'photos');
+        if (photosCol === undefined) {
+          // photos 컬럼 직접 탐지
+          const photosIdx = normHdr['photos'];
+          if (photosIdx !== undefined) {
+            const photosRaw = (fields[photosIdx] || '').trim();
+            try {
+              const arr = JSON.parse(photosRaw);
+              if (Array.isArray(arr)) {
+                for (let i = 0; i < 5 && i < arr.length; i++) {
+                  photoVals[i] = String(arr[i] || '');
+                }
+              }
+            } catch { /* not JSON */ }
+          }
+        }
+      }
+
+      // photos_count: 우선 원본 컬럼 → photo1~5 비어있지 않은 수 계산
+      let photosCount = get('photos_count');
+      if (!photosCount) {
+        const nonEmpty = photoVals.filter(v => v).length;
+        photosCount = nonEmpty > 0 ? String(nonEmpty) : '';
+      }
+
       // 출력 행 조립
       const row = [
         hotelId,
@@ -312,12 +368,25 @@ async function main() {
         get('star_rating'),
         get('review_score'),
         get('review_count'),
-        get('photos_count'),
+        photosCount,                               // photos_count (계산된 값)
         get('latitude'),
         get('longitude'),
         get('price_min'),
+        get('currency'),
         get('checkin_time'),
         get('checkout_time'),
+        get('overview'),
+        get('numberrooms'),
+        get('chain_name'),
+        photoVals[0],                              // photo1
+        photoVals[1],                              // photo2
+        photoVals[2],                              // photo3
+        photoVals[3],                              // photo4
+        photoVals[4],                              // photo5
+        get('rating_average'),                     // rating_average (원본)
+        get('number_of_reviews'),                  // number_of_reviews (원본)
+        get('rates_from'),                         // rates_from
+        get('rates_currency'),                     // rates_currency
         get('content_priority') || 'normal',
         'agoda-hoteldata',
       ];

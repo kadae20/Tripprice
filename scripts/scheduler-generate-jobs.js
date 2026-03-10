@@ -10,7 +10,7 @@
  * 후보 선정 조건 (모두 충족해야 함):
  *   1. publish_status = active (또는 필드 없음)
  *   2. data/processed/{hotel_id}.json 존재
- *   3. state/coverage/{hotel_id}.json 있으면 coverage_score >= 60
+ *   3. state/coverage/{hotel_id}.json 있으면 coverage_score >= 60 (일반) / >=10 (top5-list)
  *   4. 미발행 (state/campaigns/*-published.json 에 없음)
  *   5. JOB_COOLDOWN_DAYS 쿨다운 기간 미포함
  *
@@ -24,7 +24,7 @@
  *   SCHED_CANDIDATE_POOL — 후보 풀 상한 (기본 20000)
  *   JOB_COOLDOWN_DAYS    — rotation 쿨다운 일수 (기본 14)
  *   LIST_SHARE           — top5-list 비율 (기본 0.3, 0~1)
- *   MIN_LIST_SCORE       — top5-list 대상 최소 coverage_score (기본 25)
+ *   MIN_LIST_SCORE       — top5-list 대상 최소 coverage_score (기본 10)
  *   THEME                — top5-list 정렬 기준 (rating|reviews|stars|photos|checkin|city, 기본 rating)
  *   LIST_CITY_MAX        — top5-list 최대 도시 수 (기본 3)
  *
@@ -59,9 +59,9 @@ const CANDIDATE_POOL = Math.min(
   parseInt(process.env.SCHED_CANDIDATE_POOL || '20000', 10), 100000
 );
 const LIST_SHARE     = Math.min(Math.max(parseFloat(process.env.LIST_SHARE     || '0.3'), 0), 1);
-const MIN_LIST_SCORE = Math.min(parseInt(process.env.MIN_LIST_SCORE || '25', 10), 100);
+const MIN_LIST_SCORE = Math.min(parseInt(process.env.MIN_LIST_SCORE || '10', 10), 100);
 const LIST_CITY_MAX  = Math.min(parseInt(process.env.LIST_CITY_MAX  || '3',  10), 10);
-const THEME          = process.env.THEME || args.theme || 'rating';
+const THEME          = process.env.THEME || args.theme || 'family';
 const DRY_RUN  = args['dry-run'] === true;
 const OUT_PATH = path.resolve(ROOT, args.out || 'config/daily-jobs.json');
 const today    = new Date().toISOString().split('T')[0];
@@ -275,35 +275,51 @@ async function streamCandidateHotels(publishedMap, rotState, cooldownDaysOverrid
 }
 
 // ── top5-list: 테마 점수 계산 ─────────────────────────────────────────────────
+// 페르소나 테마(family/couple/business/airport): 여행자 유형별 가중치
+// 데이터 테마(rating/reviews/stars 등): 하위 호환 유지
 function scoreHotelByTheme(h, theme) {
+  const rating  = parseFloat(h.review_score || h.rating || '0') || 0;
+  const reviews = parseInt(h.review_count || h.num_reviews || '0', 10) || 0;
+  const stars   = parseFloat(h.star_rating || h.stars || '0') || 0;
+  const photos  = parseInt(h.photo_count || h.photos_count || '0', 10) || 0;
+
   switch (theme) {
-    case 'rating':   return parseFloat(h.review_score || h.rating || '0') || 0;
-    case 'reviews':  return parseInt(h.review_count || h.num_reviews || '0', 10) || 0;
-    case 'stars':    return parseFloat(h.star_rating || h.stars || '0') || 0;
-    case 'photos':   return parseInt(h.photo_count || '0', 10) || 0;
-    case 'checkin':  return parseFloat(h.star_rating || h.stars || '0') || 0; // 별점 proxy
+    // ── 페르소나 테마 (top5-list 주요 활용) ──────────────────────────────────
+    case 'family':   return rating * 2 + stars * 3 + Math.min(5, reviews / 1000);
+    case 'couple':   return stars * 5 + rating * 3;
+    case 'business': return rating * 4 + stars * 2;
+    case 'airport':  return reviews * 0.002 + rating * 2;
+    // ── 데이터 테마 (하위 호환) ───────────────────────────────────────────────
+    case 'rating':   return rating;
+    case 'reviews':  return reviews;
+    case 'stars':    return stars;
+    case 'photos':   return photos;
+    case 'checkin':  return stars; // 별점 proxy
     case 'city': {
-      const star   = parseFloat(h.star_rating || h.stars || '0') || 0;
-      const rating = parseFloat(h.review_score || h.rating || '0') || 0;
-      return star * 5 + rating * 3;
+      return stars * 5 + rating * 3;
     }
-    default:         return parseFloat(h.review_score || h.rating || '0') || 0;
+    default:         return rating;
   }
 }
 
 // ── top5-list: 테마 한국어 레이블 ─────────────────────────────────────────────
 function themeLabel(theme) {
-  const map = { rating: '평점 높은', reviews: '리뷰 많은', stars: '성급 높은',
-                photos: '사진 많은', checkin: '체크인 빠른', city: '추천' };
+  const map = {
+    // 페르소나 테마
+    family: '가족 여행', couple: '커플 여행', business: '비즈니스', airport: '공항 근처',
+    // 데이터 테마 (하위 호환)
+    rating: '평점 높은', reviews: '리뷰 많은', stars: '성급 높은',
+    photos: '사진 많은', checkin: '체크인 빠른', city: '추천',
+  };
   return map[theme] || '추천';
 }
 
-// ── top5-list: low-coverage 후보 스트리밍 (coverage 25~59) ───────────────────
+// ── top5-list: low-coverage 후보 스트리밍 (coverage 10~59) ───────────────────
 // 일반 후보 스트리밍과 같은 OOM 대응 구조.
-// 커버리지 파일이 없는 호텔은 제외 (C/D 등급 판정 불가).
+// 커버리지 파일이 없는 호텔은 제외 (B/C/D 등급 판정 불가).
 async function streamListCandidateHotels(rotState, cooldownDaysOverride) {
   if (!fs.existsSync(TRIPPRICE_CSV)) return [];
-  const MAX_LIST_SCORE = 59;
+  const MAX_LIST_SCORE = 59; // top5-list: coverage 10~59 (B/C/D 등급)
 
   return new Promise((resolve, reject) => {
     const candidates = [];
@@ -559,7 +575,7 @@ if (require.main === module) (async () => {
   // ── top5-list 작업 (coverage C/D등급 후보) ───────────────────────────────
   let listJobs = [];
   if (LIST_JOB_TARGET > 0) {
-    console.log(`  top5-list 후보 로딩 중 (coverage ${MIN_LIST_SCORE}~59, 스트리밍)...`);
+    console.log(`  top5-list 후보 로딩 중 (coverage ${MIN_LIST_SCORE}~59, 스트리밍, A등급 미만)...`);
     let listCandidates = await streamListCandidateHotels(rotState);
 
     if (listCandidates.length === 0 && rotation.COOLDOWN_DAYS > 0) {

@@ -40,59 +40,90 @@ const REQUIRED_FIELDS = ['hotel_name', 'city', 'country', 'address'];
 // source_url 또는 partner_url 중 하나 필수
 const REQUIRED_URL_FIELDS = ['source_url', 'partner_url'];
 
-// Coverage score 항목 (총 100점)
-// data-pipeline-quality.md 기준
-// key: v2 정규화 필드명. check 함수에서 v1 필드 폴백 처리.
-const COVERAGE_CRITERIA = [
-  {
-    key: 'photos_count',
-    label: '사진 ≥ 5장',
-    points: 20,
-    check: (v) => (parseInt(v, 10) || 0) >= 5,
-  },
-  {
-    key: 'amenities',
-    label: '어메니티 ≥ 10개',
-    points: 15,
-    check: (v) => Array.isArray(v) ? v.length >= 10 : (parseInt(v, 10) || 0) >= 10,
-  },
-  {
-    key: 'location_description',
-    label: '위치 설명',
-    points: 15,
-    check: (v) => typeof v === 'string' && v.trim().length > 0,
-  },
-  {
-    key: 'review_summary',
-    label: '후기 요약',
-    points: 15,
-    check: (v) => typeof v === 'string' && v.trim().length > 0,
-  },
-  {
-    key: 'room_types',
-    label: '객실 타입 설명',
-    points: 10,
-    check: (v) => (Array.isArray(v) ? v.length > 0 : typeof v === 'string' && v.trim().length > 0),
-  },
-  {
-    key: 'transport_info',
-    label: '교통/동선 정보',
-    points: 10,
-    check: (v) => typeof v === 'string' && v.trim().length > 0,
-  },
-  {
-    key: 'price_min',
-    label: '가격대 정보',
-    points: 10,
-    check: (v) => v !== null && v !== undefined && String(v).trim().length > 0,
-  },
-  {
-    key: 'checkin_time',
-    label: '체크인 정보',
-    points: 5,
-    check: (v) => typeof v === 'string' && v.trim().length > 0,
-  },
-];
+// ── Coverage Score v2 (CSV-only, 0~100점) ─────────────────────────────────────
+/**
+ * Agoda hoteldata CSV 필드 기반 coverage 점수 계산 (v2).
+ * 6개 항목: photos(30), overview(25), rating(20), reviews(15), checkin/checkout(5), lat/lon(5)
+ * 등급: A>=60, B>=40, C>=20, D<20
+ */
+function calculateCoverageScoreV2(h) {
+  const missing = [];
+  let score = 0;
+
+  // photos: count of photo1~5 that are non-empty (30 pts)
+  const photoCount = parseInt(h.photos_count || h.photo_count || '0', 10) || 0;
+  let photoPts;
+  if (photoCount >= 5) photoPts = 30;
+  else if (photoCount >= 3) photoPts = 18;
+  else if (photoCount >= 1) photoPts = 8;
+  else { photoPts = 0; missing.push('photos'); }
+  score += photoPts;
+
+  // overview / location_description (25 pts)
+  const overviewLen = (h.location_description || h.overview || '').trim().length;
+  let overviewPts;
+  if (overviewLen >= 100) overviewPts = 25;
+  else if (overviewLen >= 50) overviewPts = 15;
+  else if (overviewLen >= 1) overviewPts = 5;
+  else { overviewPts = 0; missing.push('overview'); }
+  score += overviewPts;
+
+  // rating_average (20 pts)
+  const rating = parseFloat(h.review_score || h.rating_average || '0') || 0;
+  let ratingPts;
+  if (rating >= 8.0) ratingPts = 20;
+  else if (rating >= 6.0) ratingPts = 14;
+  else if (rating > 0) ratingPts = 7;
+  else { ratingPts = 0; missing.push('rating_average'); }
+  score += ratingPts;
+
+  // number_of_reviews (15 pts)
+  const reviews = parseInt(h.review_count || h.number_of_reviews || '0', 10) || 0;
+  let reviewPts;
+  if (reviews >= 1000) reviewPts = 15;
+  else if (reviews >= 100) reviewPts = 10;
+  else if (reviews >= 10) reviewPts = 5;
+  else { reviewPts = 0; missing.push('number_of_reviews'); }
+  score += reviewPts;
+
+  // checkin + checkout (5 pts)
+  const hasCheckin  = !!(h.checkin_time  || h.checkin  || '').trim();
+  const hasCheckout = !!(h.checkout_time || h.checkout || '').trim();
+  let checkinPts;
+  if (hasCheckin && hasCheckout) checkinPts = 5;
+  else if (hasCheckin || hasCheckout) checkinPts = 2;
+  else { checkinPts = 0; missing.push('checkin_checkout'); }
+  score += checkinPts;
+
+  // lat/lon (5 pts)
+  const hasLat = !isNaN(parseFloat(h.lat || h.latitude  || '')) && parseFloat(h.lat || h.latitude  || '') !== 0;
+  const hasLon = !isNaN(parseFloat(h.lon || h.longitude || '')) && parseFloat(h.lon || h.longitude || '') !== 0;
+  let latLonPts;
+  if (hasLat && hasLon) latLonPts = 5;
+  else { latLonPts = 0; missing.push('coordinates'); }
+  score += latLonPts;
+
+  score = Math.min(100, score);
+
+  // Grade: A>=60, B>=40, C>=20, D<20
+  let grade, action;
+  if      (score >= 60) { grade = 'A'; action = '단독 리뷰형 글 발행 가능'; }
+  else if (score >= 40) { grade = 'B'; action = '발행 가능 (보강 권장)'; }
+  else if (score >= 20) { grade = 'C'; action = 'top5-list 전용 발행'; }
+  else                  { grade = 'D'; action = '발행 불가 — 데이터 보강 필요'; }
+
+  // breakdown (하위 호환: 기존 테스트들이 breakdown 필드 접근)
+  const breakdown = {
+    photos_count:        { label: '사진 수',    points: photoPts,   max: 30 },
+    overview:            { label: '소개글',      points: overviewPts, max: 25 },
+    rating_average:      { label: '평점',        points: ratingPts,  max: 20 },
+    number_of_reviews:   { label: '리뷰 수',     points: reviewPts,  max: 15 },
+    checkin_checkout:    { label: '체크인/아웃', points: checkinPts, max: 5  },
+    lat_lng:             { label: '좌표',        points: latLonPts,  max: 5  },
+  };
+
+  return { score, grade, action, breakdown, missing };
+}
 
 // ──────────────────────────────────────────────
 // CSV 파서 (외부 패키지 없이 구현)
@@ -270,8 +301,14 @@ function normalizeHotel(raw) {
     checkoutTime = parsed.checkout_time;
   }
 
-  // ── 사진 수 (v2 우선, v1 photos 폴백) ─────────
+  // ── 사진 수 (v2 우선, photo1~5 카운트, v1 photos 폴백) ────────────────────
   let photosCount = raw.photos_count ? parseInt(raw.photos_count, 10) : null;
+  if (!photosCount) {
+    // photo1~5 중 비어있지 않은 개수 계산
+    const photoUrls = [raw.photo1, raw.photo2, raw.photo3, raw.photo4, raw.photo5];
+    const nonEmpty  = photoUrls.filter(v => v && String(v).trim()).length;
+    if (nonEmpty > 0) photosCount = nonEmpty;
+  }
   if (!photosCount && raw.photos) {
     const p = raw.photos;
     if (typeof p === 'number') photosCount = p;
@@ -312,8 +349,10 @@ function normalizeHotel(raw) {
     district: (raw.district || '').trim(),
 
     // 위치 좌표 및 교통
-    latitude: raw.latitude ? parseFloat(raw.latitude) : null,
-    longitude: raw.longitude ? parseFloat(raw.longitude) : null,
+    latitude: raw.latitude ? parseFloat(raw.latitude) : (raw.lat ? parseFloat(raw.lat) : null),
+    longitude: raw.longitude ? parseFloat(raw.longitude) : (raw.lon || raw.lng ? parseFloat(raw.lon || raw.lng) : null),
+    lat: raw.latitude ? parseFloat(raw.latitude) : (raw.lat ? parseFloat(raw.lat) : null),
+    lon: raw.longitude ? parseFloat(raw.longitude) : (raw.lon || raw.lng ? parseFloat(raw.lon || raw.lng) : null),
     nearest_station: (raw.nearest_station || '').trim(),
     station_walk_min: raw.station_walk_min ? parseInt(raw.station_walk_min, 10) : null,
 
@@ -325,13 +364,13 @@ function normalizeHotel(raw) {
       : [],
 
     // 가격
-    price_min: priceMin,
+    price_min: priceMin !== null ? priceMin : (parseFloat(raw.rates_from || '0') || 0),
     price_max: priceMax,
-    currency: (raw.currency || 'KRW').trim(),
+    currency: (raw.currency || raw.rates_currency || 'KRW').trim(),
 
     // 체크인/아웃
-    checkin_time: checkinTime,
-    checkout_time: checkoutTime,
+    checkin_time: checkinTime || (raw.checkin || '').trim(),
+    checkout_time: checkoutTime || (raw.checkout || '').trim(),
 
     // 시설
     amenities,
@@ -342,11 +381,16 @@ function normalizeHotel(raw) {
     photo_source: (raw.photo_source || '').trim(),
 
     // 콘텐츠
-    location_description: (raw.location_description || '').trim(),
+    location_description: (raw.location_description
+      || (raw.overview ? String(raw.overview).trim().slice(0, 200) : '')).trim(),
     transport_info: (raw.transport_info || '').trim(),
     review_summary: (raw.review_summary || '').trim(),
-    review_score: raw.review_score ? parseFloat(raw.review_score) : null,
-    review_count: raw.review_count ? parseInt(raw.review_count, 10) : null,
+    review_score: raw.review_score
+      ? parseFloat(raw.review_score)
+      : (raw.rating_average ? parseFloat(raw.rating_average) : null),
+    review_count: raw.review_count
+      ? parseInt(raw.review_count, 10)
+      : (raw.number_of_reviews ? parseInt(raw.number_of_reviews, 10) : null),
 
     // 제휴
     agoda_hotel_id: agodaId,
@@ -360,6 +404,26 @@ function normalizeHotel(raw) {
     data_source: (raw.data_source || '').trim(),
     data_fetched_at: (raw.data_fetched_at || '').trim(),
     notes: (raw.notes || '').trim(),
+
+    // 추가 Agoda 필드 (coverage v2용)
+    overview: (raw.overview || '').trim(),
+    numberrooms: raw.numberrooms ? parseInt(raw.numberrooms, 10) : null,
+    chain_name: (raw.chain_name || '').trim(),
+
+    // 개별 사진 URL (photo1~5) — coverage scoring용
+    photo1: (raw.photo1 || '').trim(),
+    photo2: (raw.photo2 || '').trim(),
+    photo3: (raw.photo3 || '').trim(),
+    photo4: (raw.photo4 || '').trim(),
+    photo5: (raw.photo5 || '').trim(),
+
+    // 원본 Agoda 필드명 별칭 (scoring 폴백용)
+    rating_average: raw.rating_average ? parseFloat(raw.rating_average) : null,
+    number_of_reviews: raw.number_of_reviews ? parseInt(raw.number_of_reviews, 10) : null,
+    checkin: (raw.checkin || '').trim(),
+    checkout: (raw.checkout || '').trim(),
+    rates_from: raw.rates_from ? parseFloat(raw.rates_from) : null,
+    rates_currency: (raw.rates_currency || '').trim(),
 
     // 적재 메타
     ingested_at: new Date().toISOString(),
@@ -450,7 +514,7 @@ function generateReport(results, sourceFiles) {
   // Coverage 등급 분포
   const gradeDist = { A: 0, B: 0, C: 0, D: 0 };
   for (const r of results) {
-    if (r.coverage) gradeDist[r.coverage.grade]++;
+    if (r.coverage) gradeDist[r.coverage.grade] = (gradeDist[r.coverage.grade] || 0) + 1;
   }
 
   let md = `# Tripprice 호텔 데이터 적재 리포트\n\n`;
@@ -464,12 +528,12 @@ function generateReport(results, sourceFiles) {
   md += `| 실패 (필수 필드 누락) | ${failed} |\n`;
   md += `| 건너뜀 (빈 행) | ${skipped} |\n\n`;
 
-  md += `## Coverage Score 등급 분포\n\n`;
+  md += `## Coverage Score v2 등급 분포\n\n`;
   md += `| 등급 | 수 | 기준 |\n|------|----|------|\n`;
-  md += `| A (80~100점) | ${gradeDist.A} | 단독 리뷰형 발행 가능 |\n`;
-  md += `| B (60~79점) | ${gradeDist.B} | 발행 가능, 보강 권장 |\n`;
-  md += `| C (40~59점) | ${gradeDist.C} | 비교표 카드만 허용 |\n`;
-  md += `| D (0~39점) | ${gradeDist.D} | 발행 불가, 보강 필요 |\n\n`;
+  md += `| A (60~100점) | ${gradeDist.A || 0} | 단독 리뷰형 발행 가능 |\n`;
+  md += `| B (40~59점) | ${gradeDist.B || 0} | 발행 가능 (보강 권장) |\n`;
+  md += `| C (20~39점) | ${gradeDist.C || 0} | top5-list 전용 발행 |\n`;
+  md += `| D (0~19점) | ${gradeDist.D || 0} | 발행 불가, 보강 필요 |\n\n`;
 
   if (Object.keys(missingFieldCount).length > 0) {
     md += `## 자주 누락된 필드 / 오류\n\n`;
@@ -588,8 +652,8 @@ function processFile(filePath) {
       // 2) 정규화
       const normalized = normalizeHotel(raw);
 
-      // 3) Coverage score 계산
-      const coverage = calculateCoverageScore(normalized);
+      // 3) Coverage score 계산 (v2: CSV-only)
+      const coverage = calculateCoverageScoreV2(normalized);
 
       // 4) data/processed/{hotel_id}.json 저장
       const processedPath = path.join(DIR_PROCESSED, `${normalized.hotel_id}.json`);
@@ -608,7 +672,7 @@ function processFile(filePath) {
         updated_at: new Date().toISOString(),
       });
 
-      const gradeIcon = { A: '✓', B: '✓', C: '⚠', D: '✗' }[coverage.grade];
+      const gradeIcon = { A: '✓', B: '✓', C: '⚠', D: '✗' }[coverage.grade] || '?';
       console.log(
         `  ${gradeIcon} ${normalized.hotel_id} — ${coverage.score}점 (${coverage.grade}등급)` +
         (warnings.length > 0 ? ` ⚠ ${warnings.join(', ')}` : '')
@@ -707,4 +771,6 @@ function main() {
   }
 }
 
-main();
+if (require.main === module) main();
+
+module.exports = { calculateCoverageScoreV2, normalizeHotel };
