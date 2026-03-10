@@ -88,10 +88,14 @@ console.log(`  모드: ${doPublish ? '전체 (wp-publish 포함)' : '안전 (bui
 console.log(divider);
 
 // ── STEP 1: build-brief ───────────────────────────────────────────────────────
+const briefArgs = [`--hotels=${args.hotels}`, `--lang=${lang}`];
+if (args['post-type']) briefArgs.push(`--post-type=${args['post-type']}`);
+if (args.theme)        briefArgs.push(`--theme=${args.theme}`);
+
 const briefOut = run(
   'STEP 1/4  build-brief',
   'build-brief.js',
-  [`--hotels=${args.hotels}`, `--lang=${lang}`]
+  briefArgs
 );
 
 const briefFile = parseOutputFile(briefOut, '.json');

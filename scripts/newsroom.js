@@ -194,7 +194,9 @@ async function runDaily() {
       rotation.save(rotState);
 
       // STEP: pipeline (build-brief → generate-draft → images → seo-qa → build-wp-post)
-      const pipeArgs   = [`--hotels=${hotels}`, `--lang=${lang}`, '--no-images'];
+      const pipeArgs = [`--hotels=${hotels}`, `--lang=${lang}`, '--no-images'];
+      if (job.post_type) pipeArgs.push(`--post-type=${job.post_type}`);
+      if (job.theme)     pipeArgs.push(`--theme=${job.theme}`);
       const pipeResult = runScript('pipeline.js', pipeArgs, { failOk: true });
       jobLog.steps.push({ step: 'pipeline', ok: pipeResult.ok });
 

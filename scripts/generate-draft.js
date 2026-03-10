@@ -44,8 +44,10 @@ if (!briefPath) {
 }
 
 const brief = JSON.parse(fs.readFileSync(briefPath, 'utf8'));
-const { hotels, lang, post_type, slug, suggested_title, suggested_meta_description,
+const { hotels, lang, post_type, theme, slug, suggested_title, suggested_meta_description,
         selection_criteria, target_persona } = brief;
+
+const isTop5List = post_type === 'top5-list';
 
 const today = new Date().toISOString().split('T')[0];
 const isKo = lang === 'ko';
@@ -504,6 +506,123 @@ function buildFooter() {
   ].join('\n');
 }
 
+// ── top5-list 전용 빌더 ───────────────────────────────────────────────────────
+
+const TOP5_THEME_LABEL = {
+  rating: '평점 높은', reviews: '리뷰 많은', stars: '성급 높은',
+  photos: '사진 많은', checkin: '체크인 빠른', city: '추천',
+};
+const TOP5_THEME_FIELD = {
+  rating: (h) => h.review_score   ? `${h.review_score}점` : '정보 없음',
+  reviews:(h) => h.review_count   ? `${h.review_count.toLocaleString()}개` : '정보 없음',
+  stars:  (h) => h.star_rating    ? `${h.star_rating}성급` : '정보 없음',
+  photos: (h) => h.photos_count   ? `${h.photos_count}장` : '정보 없음',
+  checkin:(h) => h.checkin_time   || '15:00 (표준)',
+  city:   (h) => h.nearest_station? `${h.nearest_station} 도보 ${h.station_walk_min}분` : '정보 없음',
+};
+const TOP5_THEME_CRITERIA = {
+  rating: '아고다 투숙객 평점 기준 상위 선정',
+  reviews:'리뷰 수(투숙객 후기) 많은 순 선정',
+  stars:  '공식 별점 등급 기준 선정',
+  photos: '공식 사진 자료 풍부한 순 선정',
+  checkin:'체크인 유연성(별점 기반) 기준 선정',
+  city:   '위치·평점 종합 기준 도시 내 상위 선정',
+};
+const TOP5_DISCLAIMER = '> ⚠️ **데이터 한계 안내:** 이 리스트의 호텔들은 공개 데이터가 제한적입니다. 시설·가격·서비스 세부 정보는 반드시 예약 페이지에서 직접 확인하세요.';
+
+function buildTop5HotelSection(h, rank, th) {
+  const name   = isKo ? h.hotel_name : (h.hotel_name_en || h.hotel_name);
+  const field  = (TOP5_THEME_FIELD[th] || TOP5_THEME_FIELD.rating)(h);
+  const lines  = [];
+
+  lines.push(`### ${rank}위. ${name}`);
+  lines.push('');
+  lines.push(TOP5_DISCLAIMER);
+  lines.push('');
+  lines.push(`- **${TOP5_THEME_LABEL[th] || '평점'}:** ${field}`);
+  lines.push(`- **위치:** ${h.nearest_station ? `${h.nearest_station} 도보 ${h.station_walk_min}분` : h.district || h.city || '정보 없음'}`);
+  lines.push(`- **가격대:** ${KRW(h.price_min)} ~ ${KRW(h.price_max)} *(예약 페이지 기준 확인 필요)*`);
+  if ((h.amenities || []).length > 0) {
+    lines.push(`- **주요 시설:** ${h.amenities.slice(0, 4).join(', ')}`);
+  }
+  lines.push('');
+
+  const ctaText = `${name} 현재 가격 확인하기 →`;
+  const ctaUrl  = h.partner_url || `https://www.agoda.com/hotel/${h.agoda_hotel_id}`;
+  lines.push(`> **[${ctaText}](${ctaUrl})**`);
+  lines.push('> *(아고다 파트너 링크 | rel="sponsored")*');
+  lines.push('');
+
+  return lines.join('\n');
+}
+
+function buildTop5FAQ(city, th) {
+  const cityName = cityKo(city);
+  const lines = ['## 자주 묻는 질문 (FAQ)', ''];
+  const thLabel = TOP5_THEME_LABEL[th] || '추천';
+
+  lines.push(`**Q. 이 리스트에서 ${thLabel} 기준은 무엇인가요?**`);
+  lines.push(`A. ${TOP5_THEME_CRITERIA[th] || thLabel}. 아고다에 등록된 공개 데이터를 기준으로 했으며, 실시간 변동이 있을 수 있습니다.`);
+  lines.push('');
+  lines.push(`**Q. ${cityName} 호텔 예약은 얼마나 일찍 해야 하나요?**`);
+  lines.push('A. 성수기(봄·가을 연휴, 연말)에는 최소 4~6주 전 예약을 권장합니다. 비수기에는 2주 전도 충분한 경우가 많습니다.');
+  lines.push('');
+  lines.push('**Q. 가격·시설 정보가 실제와 다를 수 있나요?**');
+  lines.push('A. 네. 이 리스트는 공개 데이터를 기반으로 작성됐으며, 실제 가격·혜택·시설은 예약 페이지에서 반드시 직접 확인하시기 바랍니다.');
+  lines.push('');
+
+  return lines.join('\n');
+}
+
+function buildTop5ListBody() {
+  const th       = theme || 'rating';
+  const thLabel  = TOP5_THEME_LABEL[th] || '추천';
+  const city     = hotels[0].city || 'hotel';
+  const cityName = cityKo(city);
+  const year     = new Date().getFullYear();
+  const parts    = [];
+
+  parts.push(`# ${ensureMinTitle(suggested_title)}\n`);
+
+  // 빠른 결론 요약은 top5-list에서 생략 (이 글이 필요한 사람으로 대체)
+  // 이 글이 필요한 사람 (seo-qa 호환 필수 섹션)
+  parts.push('## 이 글이 필요한 사람\n');
+  parts.push(`${cityName} 호텔을 찾고 있는데 정보가 부족해서 어디서 시작할지 모르겠다면 이 글이 도움이 됩니다. ${thLabel} 호텔을 빠르게 파악하고, 예약 전 기본 선택지를 좁히고 싶은 분께 유용합니다.\n`);
+
+  // 선택 기준 (seo-qa 호환 필수 섹션)
+  parts.push('## 선택 기준\n');
+  parts.push(`이 리스트는 **${TOP5_THEME_CRITERIA[th] || thLabel}**. 아고다 공개 데이터 기준이며, 아래 항목을 참고 기준으로 활용하세요:\n`);
+  (selection_criteria || [thLabel, '위치 및 교통 접근성', '가격대 정보']).forEach((c, i) => {
+    parts.push(`${i + 1}. **${c}**`);
+  });
+  parts.push('');
+
+  // 순위 테이블
+  parts.push('## 순위 요약\n');
+  const fieldFn = TOP5_THEME_FIELD[th] || TOP5_THEME_FIELD.rating;
+  const tableHeader = `| 순위 | 호텔 | ${thLabel} | 위치 | 가격대 |`;
+  const tableSep    = '|------|------|------|------|------|';
+  parts.push(tableHeader);
+  parts.push(tableSep);
+  hotels.forEach((h, i) => {
+    const name  = isKo ? h.hotel_name : (h.hotel_name_en || h.hotel_name);
+    const loc   = h.nearest_station ? `${h.nearest_station} 도보 ${h.station_walk_min}분` : (h.district || '-');
+    parts.push(`| ${i + 1}위 | ${name} | ${fieldFn(h)} | ${loc} | ${KRW(h.price_min)} ~ |`);
+  });
+  parts.push('');
+
+  // 호텔별 상세
+  parts.push('## 호텔별 상세\n');
+  hotels.forEach((h, i) => parts.push(buildTop5HotelSection(h, i + 1, th)));
+
+  // FAQ (seo-qa 호환 필수 섹션)
+  parts.push(buildTop5FAQ(city, th));
+
+  parts.push(buildInternalLinks());
+  parts.push(buildFooter());
+  return parts.join('\n');
+}
+
 // ── 템플릿 본문 빌더 (Z.ai 폴백용) ──────────────────────────────────────────
 function buildTemplateBody() {
   const parts = [];
@@ -539,20 +658,26 @@ function validateAiBody(text) {
   let body;
   let source = 'template';
 
-  try {
-    const zai    = require('../lib/zai-client');
-    const aiBody = await zai.generateHotelDraft(brief);
-    if (validateAiBody(aiBody)) {
-      body   = aiBody;
-      source = 'z.ai';
-    } else {
-      console.error('  ⚠  Z.ai 응답 검증 실패 → 템플릿 폴백');
+  // top5-list는 항상 템플릿 사용 (Z.ai 불필요)
+  if (isTop5List) {
+    body   = buildTop5ListBody();
+    source = 'template(top5-list)';
+  } else {
+    try {
+      const zai    = require('../lib/zai-client');
+      const aiBody = await zai.generateHotelDraft(brief);
+      if (validateAiBody(aiBody)) {
+        body   = aiBody;
+        source = 'z.ai';
+      } else {
+        console.error('  ⚠  Z.ai 응답 검증 실패 → 템플릿 폴백');
+        body = buildTemplateBody();
+      }
+    } catch (err) {
+      const reason = process.env.ZAI_API_KEY ? err.message : 'ZAI_API_KEY 없음';
+      console.error(`  ⚠  Z.ai 건너뜀 (${reason}) → 템플릿 폴백`);
       body = buildTemplateBody();
     }
-  } catch (err) {
-    const reason = process.env.ZAI_API_KEY ? err.message : 'ZAI_API_KEY 없음';
-    console.error(`  ⚠  Z.ai 건너뜀 (${reason}) → 템플릿 폴백`);
-    body = buildTemplateBody();
   }
 
   const markdown = frontMatter + '\n' + body;

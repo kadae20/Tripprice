@@ -1,5 +1,5 @@
 {
-  "_comment": "각 post_type 정의. scheduling_weight 합계 = 100. scheduler가 이 비율로 혼합 선택.",
+  "_comment": "각 post_type 정의. scheduling_weight 합계 = 100. scheduler가 이 비율로 혼합 선택. top5-list는 별도 low-coverage 후보 풀에서 생성.",
   "post_types": {
     "hotel-review": {
       "description": "단일 호텔 심층 리뷰 — 한 호텔의 장단점·위치·가격·투숙 데이터를 집중 분석",
@@ -18,7 +18,7 @@
         "공급자 설명 복사",
         "근거 없는 최고 단정"
       ],
-      "scheduling_weight": 30
+      "scheduling_weight": 25
     },
     "hotel-comparison": {
       "description": "2~3개 호텔 비교 — 판단 기준 제시 후 각 호텔이 어떤 여행자에게 맞는지 결론",
@@ -37,7 +37,7 @@
         "도어웨이 패턴",
         "키워드 스터핑"
       ],
-      "scheduling_weight": 35
+      "scheduling_weight": 30
     },
     "neighborhood-guide": {
       "description": "동네/지역 기반 호텔 가이드 — 동선·지역 특징 중심, 3~5개 호텔 소개",
@@ -54,7 +54,7 @@
         "도시명만 바꾼 복제",
         "도어웨이 패턴"
       ],
-      "scheduling_weight": 15
+      "scheduling_weight": 12
     },
     "seasonal-deal": {
       "description": "시즌·이벤트 기반 특가 가이드 — 여행 시즌·시기별 가격 변화 중심, 3~7개 호텔",
@@ -71,7 +71,7 @@
         "허위 특가 단정",
         "도어웨이 패턴"
       ],
-      "scheduling_weight": 10
+      "scheduling_weight": 8
     },
     "persona-match": {
       "description": "여행자 유형(페르소나) 맞춤 추천 — 커플/출장/가족/혼자 기준으로 최적 호텔 제안, 2~4개",
@@ -89,6 +89,24 @@
         "도어웨이 패턴"
       ],
       "scheduling_weight": 10
+    },
+    "top5-list": {
+      "description": "컨셉형 묶음 글 — coverage C/D등급(25~59) 호텔 5~7개를 테마(평점·리뷰·별점 등) 기준으로 선정해 순위 리스트 형식으로 발행. 데이터 한계 면책 문구 필수.",
+      "min_hotels": 5,
+      "max_hotels": 7,
+      "required_sections": [
+        "이 글이 필요한 사람",
+        "선택 기준",
+        "자주 묻는 질문"
+      ],
+      "cta_rules": { "min": 3, "max": 5 },
+      "prohibited_patterns": [
+        "도시명만 바꾼 복제",
+        "도어웨이 패턴",
+        "키워드 스터핑",
+        "데이터 부족 면책 문구 누락"
+      ],
+      "scheduling_weight": 15
     }
   }
 }

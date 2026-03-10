@@ -23,6 +23,10 @@
  *   DAILY_JOB_COUNT      — 신규 작업 수 (기본 50, 최대 200)
  *   SCHED_CANDIDATE_POOL — 후보 풀 상한 (기본 20000)
  *   JOB_COOLDOWN_DAYS    — rotation 쿨다운 일수 (기본 14)
+ *   LIST_SHARE           — top5-list 비율 (기본 0.3, 0~1)
+ *   MIN_LIST_SCORE       — top5-list 대상 최소 coverage_score (기본 25)
+ *   THEME                — top5-list 정렬 기준 (rating|reviews|stars|photos|checkin|city, 기본 rating)
+ *   LIST_CITY_MAX        — top5-list 최대 도시 수 (기본 3)
  *
  * 쿨다운 자동 완화:
  *   후보 수 < DAILY_JOB_COUNT/2 이면 쿨다운을 절반으로 줄여 재스트리밍.
@@ -54,6 +58,10 @@ const REF_COUNT = Math.min(
 const CANDIDATE_POOL = Math.min(
   parseInt(process.env.SCHED_CANDIDATE_POOL || '20000', 10), 100000
 );
+const LIST_SHARE     = Math.min(Math.max(parseFloat(process.env.LIST_SHARE     || '0.3'), 0), 1);
+const MIN_LIST_SCORE = Math.min(parseInt(process.env.MIN_LIST_SCORE || '25', 10), 100);
+const LIST_CITY_MAX  = Math.min(parseInt(process.env.LIST_CITY_MAX  || '3',  10), 10);
+const THEME          = process.env.THEME || args.theme || 'rating';
 const DRY_RUN  = args['dry-run'] === true;
 const OUT_PATH = path.resolve(ROOT, args.out || 'config/daily-jobs.json');
 const today    = new Date().toISOString().split('T')[0];
@@ -73,10 +81,11 @@ function loadPlaybook() {
 }
 
 // post_type 가중 랜덤 선택 (playbook scheduling_weight 기준)
+// top5-list는 별도 low-coverage 후보 풀에서 생성하므로 여기서 제외
 function pickPostType(playbook) {
   if (!playbook || !playbook.post_types) return 'hotel-comparison';
-  const types   = Object.entries(playbook.post_types);
-  const total   = types.reduce((s, [, t]) => s + (t.scheduling_weight || 0), 0);
+  const types = Object.entries(playbook.post_types).filter(([name]) => name !== 'top5-list');
+  const total = types.reduce((s, [, t]) => s + (t.scheduling_weight || 0), 0);
   if (total <= 0) return 'hotel-comparison';
   let r = Math.random() * total;
   for (const [name, t] of types) {
@@ -265,6 +274,137 @@ async function streamCandidateHotels(publishedMap, rotState, cooldownDaysOverrid
   });
 }
 
+// ── top5-list: 테마 점수 계산 ─────────────────────────────────────────────────
+function scoreHotelByTheme(h, theme) {
+  switch (theme) {
+    case 'rating':   return parseFloat(h.review_score || h.rating || '0') || 0;
+    case 'reviews':  return parseInt(h.review_count || h.num_reviews || '0', 10) || 0;
+    case 'stars':    return parseFloat(h.star_rating || h.stars || '0') || 0;
+    case 'photos':   return parseInt(h.photo_count || '0', 10) || 0;
+    case 'checkin':  return parseFloat(h.star_rating || h.stars || '0') || 0; // 별점 proxy
+    case 'city': {
+      const star   = parseFloat(h.star_rating || h.stars || '0') || 0;
+      const rating = parseFloat(h.review_score || h.rating || '0') || 0;
+      return star * 5 + rating * 3;
+    }
+    default:         return parseFloat(h.review_score || h.rating || '0') || 0;
+  }
+}
+
+// ── top5-list: 테마 한국어 레이블 ─────────────────────────────────────────────
+function themeLabel(theme) {
+  const map = { rating: '평점 높은', reviews: '리뷰 많은', stars: '성급 높은',
+                photos: '사진 많은', checkin: '체크인 빠른', city: '추천' };
+  return map[theme] || '추천';
+}
+
+// ── top5-list: low-coverage 후보 스트리밍 (coverage 25~59) ───────────────────
+// 일반 후보 스트리밍과 같은 OOM 대응 구조.
+// 커버리지 파일이 없는 호텔은 제외 (C/D 등급 판정 불가).
+async function streamListCandidateHotels(rotState, cooldownDaysOverride) {
+  if (!fs.existsSync(TRIPPRICE_CSV)) return [];
+  const MAX_LIST_SCORE = 59;
+
+  return new Promise((resolve, reject) => {
+    const candidates = [];
+    const seen       = new Set();
+    let   headers    = null;
+    let   lineNum    = 0;
+    let   done       = false;
+
+    const rl = readline.createInterface({
+      input:     fs.createReadStream(TRIPPRICE_CSV),
+      crlfDelay: Infinity,
+    });
+
+    rl.on('line', line => {
+      if (done || !line.trim()) return;
+      lineNum++;
+
+      if (lineNum === 1) {
+        headers = parseCsvRow(line).map(h => h.toLowerCase().trim());
+        return;
+      }
+
+      if (candidates.length >= CANDIDATE_POOL) { done = true; rl.close(); return; }
+
+      const vals = parseCsvRow(line);
+      const h    = {};
+      if (headers) headers.forEach((k, i) => { h[k] = (vals[i] || '').trim(); });
+
+      const hotelId = h.hotel_id;
+      if (!hotelId || seen.has(hotelId)) return;
+      seen.add(hotelId);
+
+      if (h.publish_status && h.publish_status !== 'active') return;
+      if (!fs.existsSync(path.join(PROCESSED_DIR, `${hotelId}.json`))) return;
+
+      // coverage_score 25~59 (C/D 등급) — 파일 없으면 제외
+      const covPath = path.join(COVERAGE_DIR, `${hotelId}.json`);
+      if (!fs.existsSync(covPath)) return;
+      try {
+        const cov   = JSON.parse(fs.readFileSync(covPath, 'utf8'));
+        const score = cov.coverage_score ?? cov.score ?? 0;
+        if (score < MIN_LIST_SCORE || score > MAX_LIST_SCORE) return;
+      } catch { return; }
+
+      // 쿨다운
+      if (cooldownDaysOverride !== undefined) {
+        const e = rotState[rotation.comboKey([hotelId])];
+        if (cooldownDaysOverride > 0 && e && e.last_used_at) {
+          const elapsed = (Date.now() - new Date(e.last_used_at).getTime()) / 86400000;
+          if (elapsed < cooldownDaysOverride) return;
+        }
+      } else if (rotation.isOnCooldown(rotation.comboKey([hotelId]), rotState)) return;
+
+      candidates.push(h);
+    });
+
+    rl.on('close', () => resolve(candidates));
+    rl.on('error', reject);
+  });
+}
+
+// ── top5-list 작업 생성 ───────────────────────────────────────────────────────
+// 도시별로 테마 점수 상위 5~7개 호텔을 묶어 top5-list 작업 생성.
+// LIST_CITY_MAX 도시 초과 불가.
+function buildTop5ListJobs(listCandidates, maxJobs, theme, cooldownRelaxed = false) {
+  const MIN_HOTELS = 5;
+  const MAX_HOTELS = 7;
+
+  const byCity = {};
+  for (const h of listCandidates) {
+    const c = h.city || 'unknown';
+    if (!byCity[c]) byCity[c] = [];
+    byCity[c].push(h);
+  }
+
+  const jobs       = [];
+  let   citiesUsed = 0;
+
+  for (const [city, cityHotels] of Object.entries(byCity)) {
+    if (jobs.length >= maxJobs)      break;
+    if (citiesUsed >= LIST_CITY_MAX) break;
+    if (cityHotels.length < MIN_HOTELS) continue;
+
+    const sorted   = [...cityHotels].sort((a, b) => scoreHotelByTheme(b, theme) - scoreHotelByTheme(a, theme));
+    const pick     = sorted.slice(0, MAX_HOTELS);
+    const hotelIds = pick.map(h => h.hotel_id).join(',');
+
+    jobs.push({
+      hotels:    hotelIds,
+      lang:      'ko',
+      post_type: 'top5-list',
+      theme,
+      note:      `${city} ${themeLabel(theme)} 호텔 TOP5 (top5-list)${cooldownRelaxed ? ' [쿨다운완화]' : ''}`,
+      type:      'new',
+    });
+    citiesUsed++;
+  }
+
+  return jobs;
+}
+
 // ── 후보 0개일 때 원인 진단 ───────────────────────────────────────────────────
 function diagnoseCandidateZero(publishedCount, rotState) {
   console.error('\n  후보 0개 — 원인 진단:');
@@ -299,7 +439,7 @@ function diagnoseCandidateZero(publishedCount, rotState) {
 }
 
 // ── 메인 ─────────────────────────────────────────────────────────────────────
-(async () => {
+if (require.main === module) (async () => {
   // state/rotation/rotation.json 없으면 자동 생성
   const rotDir = path.join(ROOT, 'state', 'rotation');
   if (!fs.existsSync(rotDir)) fs.mkdirSync(rotDir, { recursive: true });
@@ -314,10 +454,14 @@ function diagnoseCandidateZero(publishedCount, rotState) {
   const rotState     = rotation.load();
   const playbook     = loadPlaybook();
 
+  const LIST_JOB_TARGET    = Math.round(DAILY_JOB_COUNT * LIST_SHARE);
+  const REGULAR_JOB_TARGET = DAILY_JOB_COUNT - LIST_JOB_TARGET;
+
   console.log(`\n작업 스케줄러 (${today})`);
   console.log(`  후보 풀 상한  : ${CANDIDATE_POOL}`);
-  console.log(`  목표 작업 수  : 신규 ${DAILY_JOB_COUNT} + 리프레시 ${REF_COUNT}`);
+  console.log(`  목표 작업 수  : 일반 ${REGULAR_JOB_TARGET} + top5-list ${LIST_JOB_TARGET} + 리프레시 ${REF_COUNT}`);
   console.log(`  쿨다운        : ${rotation.COOLDOWN_DAYS}일`);
+  console.log(`  LIST_SHARE    : ${LIST_SHARE}  THEME: ${THEME}`);
   if (playbook) console.log(`  playbook      : 로드 완료 (${Object.keys(playbook.post_types || {}).length}개 유형)`);
   console.log('  후보 로딩 중 (스트리밍)...');
 
@@ -366,7 +510,7 @@ function diagnoseCandidateZero(publishedCount, rotState) {
 
   // 비교/neighborhood/seasonal/persona 유형: 같은 city에서 복수 호텔
   for (const [city, cityHotels] of Object.entries(byCity)) {
-    if (newJobs.length >= DAILY_JOB_COUNT) break;
+    if (newJobs.length >= REGULAR_JOB_TARGET) break;
     const available = cityHotels.filter(h => !usedInJob.has(h.hotel_id));
     if (available.length < 2) continue;
 
@@ -394,7 +538,7 @@ function diagnoseCandidateZero(publishedCount, rotState) {
 
   // ── 단독 리뷰 (hotel-review 또는 미사용 호텔) ────────────────────────────
   for (const h of selected) {
-    if (newJobs.length >= DAILY_JOB_COUNT) break;
+    if (newJobs.length >= REGULAR_JOB_TARGET) break;
     if (usedInJob.has(h.hotel_id)) continue;
     usedInJob.add(h.hotel_id);
     // 단독 유형은 hotel-review 또는 playbook에서 min_hotels=1 인 것
@@ -410,6 +554,25 @@ function diagnoseCandidateZero(publishedCount, rotState) {
       note:      `${h.hotel_name || h.hotel_id} ${soloType} (신규)${cooldownRelaxed ? ' [쿨다운완화]' : ''}`,
       type:      'new',
     });
+  }
+
+  // ── top5-list 작업 (coverage C/D등급 후보) ───────────────────────────────
+  let listJobs = [];
+  if (LIST_JOB_TARGET > 0) {
+    console.log(`  top5-list 후보 로딩 중 (coverage ${MIN_LIST_SCORE}~59, 스트리밍)...`);
+    let listCandidates = await streamListCandidateHotels(rotState);
+
+    if (listCandidates.length === 0 && rotation.COOLDOWN_DAYS > 0) {
+      const relaxedDays = Math.floor(rotation.COOLDOWN_DAYS / 2);
+      listCandidates    = await streamListCandidateHotels(rotState, relaxedDays);
+      if (listCandidates.length > 0)
+        console.log(`  ⚠  top5-list 쿨다운 완화(${relaxedDays}일) 후 후보 ${listCandidates.length}개`);
+    } else {
+      console.log(`  top5-list 후보  : ${listCandidates.length}개`);
+    }
+
+    listJobs = buildTop5ListJobs(listCandidates, LIST_JOB_TARGET, THEME, cooldownRelaxed);
+    console.log(`  top5-list 작업  : ${listJobs.length}개`);
   }
 
   // ── 리프레시 작업 (기발행, 오래된 순) ────────────────────────────────────
@@ -437,12 +600,12 @@ function diagnoseCandidateZero(publishedCount, rotState) {
   }
 
   // ── 최종 합산 ─────────────────────────────────────────────────────────────
-  const allJobs = [...newJobs, ...refreshJobs];
+  const allJobs = [...newJobs, ...listJobs, ...refreshJobs];
 
   const onCooldown = Object.keys(rotState)
     .filter(k => rotation.isOnCooldown(k, rotState)).length;
 
-  console.log(`  신규: ${newJobs.length} / 리프레시: ${refreshJobs.length} / 총: ${allJobs.length}`);
+  console.log(`  일반: ${newJobs.length} / top5-list: ${listJobs.length} / 리프레시: ${refreshJobs.length} / 총: ${allJobs.length}`);
   console.log(`  기발행: ${Object.keys(publishedMap).length} / 쿨다운 키: ${onCooldown}`);
   if (cooldownRelaxed) console.log(`  ⚠  쿨다운 완화 적용됨 — 기록 유의`);
 
@@ -474,3 +637,6 @@ function diagnoseCandidateZero(publishedCount, rotState) {
   console.error('스케줄러 오류:', err.message);
   process.exit(1);
 });
+
+// ── 테스트용 exports ──────────────────────────────────────────────────────────
+module.exports = { scoreHotelByTheme, themeLabel, buildTop5ListJobs };

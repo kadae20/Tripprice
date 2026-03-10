@@ -23,8 +23,10 @@ const args = Object.fromEntries(
     })
 );
 
-const hotelIds = (args.hotels || '').split(',').map(h => h.trim()).filter(Boolean);
-const lang = args.lang || 'ko';
+const hotelIds  = (args.hotels || '').split(',').map(h => h.trim()).filter(Boolean);
+const lang      = args.lang || 'ko';
+const postTypeArg = args['post-type'] || '';   // top5-list or empty (auto)
+const themeArg    = args.theme || 'rating';    // top5-list theme
 
 if (hotelIds.length === 0) {
   console.error('오류: --hotels 옵션이 필요합니다.');
@@ -40,7 +42,12 @@ const DRAFTS_DIR    = path.join(__dirname, '..', 'wordpress', 'drafts');
 fs.mkdirSync(DRAFTS_DIR, { recursive: true });
 
 // ── 호텔 데이터 로드 ──────────────────────────────────────────────────────────
-const MIN_COVERAGE = 60;
+// top5-list는 낮은 coverage 허용 (MIN_LIST_SCORE), 그 외는 MIN_COVERAGE
+const isTop5List  = postTypeArg === 'top5-list';
+const MIN_COVERAGE    = 60;
+const MIN_LIST_SCORE  = Math.min(parseInt(process.env.MIN_LIST_SCORE || '25', 10), 100);
+const effectiveMinCov = isTop5List ? MIN_LIST_SCORE : MIN_COVERAGE;
+
 const hotels = [];
 const blocked = [];
 
@@ -62,13 +69,13 @@ for (const id of hotelIds) {
       const cov = JSON.parse(fs.readFileSync(coveragePath, 'utf8'));
       coverageScore = cov.coverage_score ?? 0;
     } else {
-      coverageScore = 0;
+      coverageScore = isTop5List ? MIN_LIST_SCORE : 0; // top5-list: coverage 파일 없으면 허용
     }
   }
 
-  if (coverageScore < MIN_COVERAGE) {
-    console.warn(`[BLOCK] ${id} — coverage ${coverageScore}점 (최소 ${MIN_COVERAGE}점 미달)`);
-    blocked.push({ hotel_id: id, coverage_score: coverageScore, reason: `coverage ${coverageScore} < ${MIN_COVERAGE}` });
+  if (coverageScore < effectiveMinCov) {
+    console.warn(`[BLOCK] ${id} — coverage ${coverageScore}점 (최소 ${effectiveMinCov}점 미달)`);
+    blocked.push({ hotel_id: id, coverage_score: coverageScore, reason: `coverage ${coverageScore} < ${effectiveMinCov}` });
     continue;
   }
 
@@ -85,7 +92,15 @@ if (hotels.length === 0) {
 }
 
 // ── 슬러그/제목 자동 생성 ─────────────────────────────────────────────────────
-function buildSlug(hotels, lang) {
+const THEME_LABEL_KO = { rating: '평점높은', reviews: '리뷰많은', stars: '성급높은',
+                          photos: '사진많은', checkin: '체크인빠른', city: '추천' };
+
+function buildSlug(hotels, lang, postType, theme) {
+  if (postType === 'top5-list') {
+    const city  = hotels[0].city || 'hotel';
+    const label = THEME_LABEL_KO[theme] || theme;
+    return `${city}-${label}-hotel-top5`;
+  }
   if (hotels.length === 1) {
     const h = hotels[0];
     const name = (h.hotel_name_en || h.hotel_id).toLowerCase().replace(/\s+/g, '-');
@@ -96,18 +111,35 @@ function buildSlug(hotels, lang) {
   return `${city}-${category}-comparison`;
 }
 
-function buildTitle(hotels, lang) {
+function buildTitle(hotels, lang, postType, theme) {
+  const cityMap = { seoul: '서울', busan: '부산', jeju: '제주', incheon: '인천' };
+  const cityKo  = cityMap[hotels[0].city] || hotels[0].city;
+  const year    = new Date().getFullYear();
+
+  if (postType === 'top5-list') {
+    const themeLabel = { rating: '평점 높은', reviews: '리뷰 많은', stars: '성급 높은',
+                         photos: '사진 많은', checkin: '체크인 빠른', city: '추천' }[theme] || '추천';
+    return `${cityKo} ${themeLabel} 호텔 TOP ${hotels.length}선 (${year})`;
+  }
   if (hotels.length === 1) {
     const h = hotels[0];
     if (lang === 'ko') return `${h.hotel_name} 솔직 리뷰 — 추천 대상, 장단점, 가격까지`;
     return `${h.hotel_name_en || h.hotel_name} Review — Who Should Stay Here?`;
   }
-  const city = hotels[0].city === 'seoul' ? '서울' : hotels[0].city;
-  if (lang === 'ko') return `${city} ${hotels[0].hotel_category === 'luxury' ? '럭셔리' : ''} 호텔 비교 추천`;
+  if (lang === 'ko') return `${cityKo} ${hotels[0].hotel_category === 'luxury' ? '럭셔리' : ''} 호텔 비교 추천`;
   return `${hotels[0].city} Hotel Comparison Guide`;
 }
 
-function buildMetaDescription(hotels, lang) {
+function buildMetaDescription(hotels, lang, postType, theme) {
+  const cityMap = { seoul: '서울', busan: '부산', jeju: '제주', incheon: '인천' };
+  const cityKo  = cityMap[hotels[0].city] || hotels[0].city;
+
+  if (postType === 'top5-list') {
+    const themeLabel = { rating: '평점', reviews: '리뷰 수', stars: '별점',
+                         photos: '사진 수', checkin: '체크인 시간', city: '종합 평가' }[theme] || '평점';
+    const names = hotels.slice(0, 3).map(h => h.hotel_name).join(', ');
+    return `${cityKo} 호텔 중 ${themeLabel} 기준 상위 ${hotels.length}선을 정리했습니다. ${names} 등 실제 데이터 기반으로 선정한 리스트를 확인하세요.`;
+  }
   if (hotels.length === 1) {
     const h = hotels[0];
     if (lang === 'ko') {
@@ -124,7 +156,12 @@ function buildMetaDescription(hotels, lang) {
 const allPersonas = [...new Set(hotels.flatMap(h => h.target_persona || []))];
 
 // ── 선택 기준 자동 제안 ───────────────────────────────────────────────────────
-function buildCriteria(hotels) {
+function buildCriteria(hotels, postType, theme) {
+  if (postType === 'top5-list') {
+    const themeLabel = { rating: '아고다 투숙객 평점', reviews: '리뷰 수(검증된 후기)', stars: '공식 별점 등급',
+                         photos: '공식 사진 수', checkin: '체크인 유연성', city: '위치·평점 종합' }[theme] || theme;
+    return [themeLabel, '위치 및 교통 접근성', '가격대 정보'];
+  }
   const criteria = ['위치 및 교통 접근성'];
   const hasPrice = hotels.some(h => h.price_min != null);
   if (hasPrice) criteria.push('가격대 및 가성비');
@@ -136,18 +173,22 @@ function buildCriteria(hotels) {
 
 // ── 브리프 JSON 구성 ──────────────────────────────────────────────────────────
 const today = new Date().toISOString().split('T')[0];
-const slug = buildSlug(hotels, lang);
+
+// post_type: CLI 인수 우선, 없으면 호텔 수 기반 자동
+const resolvedPostType = postTypeArg || (hotels.length === 1 ? 'hotel-review' : 'hotel-comparison');
+const slug = buildSlug(hotels, lang, resolvedPostType, themeArg);
 
 const brief = {
   brief_id: `brief-${slug}-${today}`,
   created_at: new Date().toISOString(),
   lang,
-  post_type: hotels.length === 1 ? 'hotel-review' : 'hotel-comparison',
+  post_type: resolvedPostType,
+  theme:     isTop5List ? themeArg : undefined,
   slug,
-  suggested_title: buildTitle(hotels, lang),
-  suggested_meta_description: buildMetaDescription(hotels, lang),
+  suggested_title: buildTitle(hotels, lang, resolvedPostType, themeArg),
+  suggested_meta_description: buildMetaDescription(hotels, lang, resolvedPostType, themeArg),
   target_persona: allPersonas,
-  selection_criteria: buildCriteria(hotels),
+  selection_criteria: buildCriteria(hotels, resolvedPostType, themeArg),
   hotels: hotels.map(h => ({
     hotel_id: h.hotel_id,
     hotel_name: h.hotel_name,
@@ -188,6 +229,9 @@ const brief = {
     human_review: false,
   },
 };
+
+// theme가 undefined면 JSON에서 키 제거
+if (brief.theme === undefined) delete brief.theme;
 
 // ── Affiliate Lite API 보강 (landing_url / image_url_lite / daily_rate_krw) ──
 /**
