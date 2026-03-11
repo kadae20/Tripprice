@@ -98,8 +98,15 @@ function cityAliases(raw) {
   return alt && alt !== base ? [base, alt] : [base];
 }
 
-/** targetCities(Set) 에 raw 도시값이 일치하는지 확인 */
-function cityMatches(rawValue, targetCities) {
+/**
+ * targetCities(Set, 정규화) 또는 targetsRaw(Set, 원본)에 rawValue가 일치하는지 확인.
+ * raw 정확 매칭을 먼저 시도하고, 그 다음 normalizeCity/alias 기반 매칭을 보조로 적용.
+ */
+function cityMatches(rawValue, targetCities, targetsRaw) {
+  const raw = rawValue.trim();
+  // 1순위: raw 정확 매칭 (한국어 도시명 포함)
+  if (targetsRaw && targetsRaw.size > 0 && targetsRaw.has(raw)) return true;
+  // 2순위: normalizeCity + alias 기반 매칭
   return cityAliases(rawValue).some(a => targetCities.has(a));
 }
 
@@ -217,7 +224,8 @@ function streamCsv(filePath, { onHeader, onRow }) {
     let hdrMap = null;
     let done   = false;
 
-    rl.on('line', line => {
+    rl.on('line', rawLine => {
+      const line = rawLine.replace(/\u0000/g, ''); // NUL 문자 제거
       if (done || !line.trim()) return;
       const fields = parseCSVLine(line);
       if (hdrMap === null) {
@@ -255,7 +263,7 @@ async function countCities() {
 
 // ── 패스 1B: 점수 수집 (performance 모드) ────────────────────────────────────
 
-async function collectScores(targetCities, perfData, rotationState) {
+async function collectScores(targetCities, targetsRaw, perfData, rotationState) {
   const scores = new Map();
   let cityIdx = -1, idIdx = -1;
 
@@ -266,7 +274,7 @@ async function collectScores(targetCities, perfData, rotationState) {
     onRow(fields, hdrMap) {
       if (idIdx < 0) return;
       if (targetCities && targetCities.size > 0 && cityIdx >= 0) {
-        if (!cityMatches(fields[cityIdx] || '', targetCities)) return;
+        if (!cityMatches(fields[cityIdx] || '', targetCities, targetsRaw)) return;
       }
       const id = (fields[idIdx] || '').trim();
       if (!id || scores.has(id)) return;
@@ -281,7 +289,7 @@ async function collectScores(targetCities, perfData, rotationState) {
 
 // ── 메인 추출 패스 ────────────────────────────────────────────────────────────
 
-async function extractPass(targetCities, allowedIds, rotationState) {
+async function extractPass(targetCities, targetsRaw, allowedIds, rotationState) {
   const tmpPath = OUTPUT_CSV + '.tmp';
   fs.mkdirSync(path.dirname(OUTPUT_CSV), { recursive: true });
   const ws = fs.createWriteStream(tmpPath, { encoding: 'utf8' });
@@ -290,7 +298,8 @@ async function extractPass(targetCities, allowedIds, rotationState) {
   let totalRead = 0, totalWritten = 0;
   const seenIds = new Set();
   const usedIds = new Set();
-  const cityDist = new Map(); // 도시 분포 (리포트용)
+  const cityDist = new Map();    // 도시 분포 (리포트용)
+  const rawCitySamples = [];     // 0행 디버그용 rawCity 샘플 (최대 10개)
   let done = false;
 
   await new Promise((resolve, reject) => {
@@ -299,7 +308,8 @@ async function extractPass(targetCities, allowedIds, rotationState) {
       crlfDelay: Infinity,
     });
 
-    rl.on('line', line => {
+    rl.on('line', rawLine => {
+      const line = rawLine.replace(/\u0000/g, ''); // NUL 문자 제거
       if (done || !line.trim()) return;
       const fields = parseCSVLine(line);
 
@@ -345,7 +355,10 @@ async function extractPass(targetCities, allowedIds, rotationState) {
 
       // ── 도시 필터 (allowedIds가 없을 때만) ────────────────────────────────
       if (!allowedIds && targetCities && targetCities.size > 0 && cityIdx >= 0) {
-        if (!cityMatches(fields[cityIdx] || '', targetCities)) return;
+        const rowCityRaw = (fields[cityIdx] || '').trim();
+        // 0행 디버그용 샘플 수집 (최대 10개)
+        if (rawCitySamples.length < 10 && rowCityRaw) rawCitySamples.push(rowCityRaw);
+        if (!cityMatches(rowCityRaw, targetCities, targetsRaw)) return;
       }
 
       // ── allowedIds 필터 (global/performance 모드) ─────────────────────────
@@ -385,12 +398,12 @@ async function extractPass(targetCities, allowedIds, rotationState) {
   });
 
   fs.renameSync(tmpPath, OUTPUT_CSV);
-  return { totalRead, totalWritten, seenIds, usedIds, cityDist };
+  return { totalRead, totalWritten, seenIds, usedIds, cityDist, rawCitySamples };
 }
 
 // ── 리포트 생성 ───────────────────────────────────────────────────────────────
 
-function generateReport({ totalRead, totalWritten, seenIds, cityDist }, mode, inputSizeMB) {
+function generateReport({ totalRead, totalWritten, seenIds, cityDist, rawCitySamples }, mode, inputSizeMB, targetsRaw) {
   const date     = new Date().toISOString().split('T')[0];
   const outStat  = fs.existsSync(OUTPUT_CSV) ? fs.statSync(OUTPUT_CSV) : null;
   const outKB    = outStat ? (outStat.size / 1024).toFixed(0) : 0;
@@ -412,6 +425,15 @@ function generateReport({ totalRead, totalWritten, seenIds, cityDist }, mode, in
     [...cityDist.entries()].sort((a, b) => b[1] - a[1]).slice(0, 30)
       .forEach(([c, n]) => { md += `| ${c} | ${n.toLocaleString()} |\n`; });
     md += '\n';
+  }
+
+  // 0행 추출 시 디버그 섹션
+  if (totalWritten === 0 && rawCitySamples && rawCitySamples.length > 0) {
+    md += `## ⚠ 0행 추출 — 디버그 정보\n\n`;
+    md += `**targetsRaw (사용자 입력):** ${[...(targetsRaw || [])].join(', ') || '(없음)'}\n\n`;
+    md += `**rowCityRaw 샘플 (CSV 실제 도시명 앞 10개):**\n\n`;
+    rawCitySamples.forEach((c, i) => { md += `${i + 1}. \`${c}\`\n`; });
+    md += '\n> targetsRaw와 rowCityRaw를 비교해 도시명 불일치 원인을 파악하세요.\n\n';
   }
 
   fs.mkdirSync(REPORT_DIR, { recursive: true });
@@ -445,6 +467,7 @@ async function main() {
 
   let targetCities = null;
   let allowedIds   = null;
+  let targetsRaw   = new Set(); // city 모드에서만 채워짐 (raw 한국어 매칭용)
 
   // ── 모드별 1패스 (global/performance) ────────────────────────────────────
   if (EXTRACT_MODE === 'global') {
@@ -465,7 +488,7 @@ async function main() {
   } else if (EXTRACT_MODE === 'performance') {
     const citiesForFilter = CITIES.length ? buildTargetCities(CITIES) : null;
     console.log(`  [1/2] 성과 점수 수집 (도시: ${citiesForFilter ? CITIES.join(',') : '전체'})...`);
-    const scores = await collectScores(citiesForFilter, perfData, rotationState);
+    const scores = await collectScores(citiesForFilter, targetsRaw, perfData, rotationState);
     const topIds = [...scores.entries()]
       .sort((a, b) => b[1] - a[1])
       .slice(0, MAX_HOTELS)
@@ -477,11 +500,12 @@ async function main() {
   } else {
     // city mode (default)
     targetCities = buildTargetCities(CITIES);
+    targetsRaw   = new Set(CITIES.map(s => s.trim()).filter(Boolean)); // raw 매칭용
     console.log(`  도시   : ${CITIES.join(', ')} → 정규화: ${[...targetCities].join(', ')}`);
   }
 
   // ── 추출 패스 ─────────────────────────────────────────────────────────────
-  const stats = await extractPass(targetCities, allowedIds, rotationState);
+  const stats = await extractPass(targetCities, targetsRaw, allowedIds, rotationState);
   process.stdout.write('\n');
 
   const { totalRead, totalWritten, seenIds, usedIds } = stats;
@@ -493,7 +517,7 @@ async function main() {
   }
 
   // 리포트 생성
-  const reportPath = generateReport(stats, EXTRACT_MODE, inputSizeMB);
+  const reportPath = generateReport(stats, EXTRACT_MODE, inputSizeMB, targetsRaw);
   console.log(`  리포트: ${path.relative(ROOT, reportPath)}`);
 
   const outStat = fs.statSync(OUTPUT_CSV);

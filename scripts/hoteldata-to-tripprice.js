@@ -229,7 +229,8 @@ async function main() {
       crlfDelay: Infinity,
     });
 
-    rl.on('line', line => {
+    rl.on('line', rawLine => {
+      const line = rawLine.replace(/\u0000/g, ''); // NUL 문자 제거 (컬럼 밀림 방지)
       if (!line.trim()) return;
       const fields = parseCSVLine(line);
 
