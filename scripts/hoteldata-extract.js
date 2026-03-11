@@ -24,7 +24,8 @@
 
 const fs       = require('fs');
 const path     = require('path');
-const readline = require('readline');
+const { parse }     = require('csv-parse');
+const { Transform } = require('stream');
 
 const ROOT         = path.resolve(__dirname, '..');
 const INPUT_CSV    = path.resolve(ROOT, process.env.HOTELDATA_LATEST_CSV || 'data/hotels/hotels-latest.csv');
@@ -42,26 +43,17 @@ const MAX_HOTELS    = Math.max(1,    parseInt(process.env.HOTELDATA_EXTRACT_HOTE
 const LOG_EVERY     = Math.max(1000, parseInt(process.env.HOTELDATA_PROGRESS_EVERY || '100000', 10));
 const COOLDOWN_DAYS = Math.max(0,    parseInt(process.env.ROTATION_COOLDOWN_DAYS   || '7',      10));
 
-// ── CSV 유틸 (RFC 4180) ───────────────────────────────────────────────────────
+// ── NUL 문자 제거 Transform ───────────────────────────────────────────────────
 
-function parseCSVLine(line) {
-  const fields = [];
-  let cur = '', inQ = false;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (inQ) {
-      if (c === '"' && line[i + 1] === '"') { cur += '"'; i++; }
-      else if (c === '"') { inQ = false; }
-      else { cur += c; }
-    } else {
-      if (c === '"') { inQ = true; }
-      else if (c === ',') { fields.push(cur); cur = ''; }
-      else { cur += c; }
-    }
-  }
-  fields.push(cur);
-  return fields;
+function createNulStrip() {
+  return new Transform({
+    transform(chunk, enc, cb) {
+      cb(null, chunk.toString('utf8').replace(/\u0000/g, ''));
+    },
+  });
 }
+
+// ── CSV 유틸 (RFC 4180) ───────────────────────────────────────────────────────
 
 function escapeCSV(val) {
   const s = String(val ?? '');
@@ -122,14 +114,19 @@ const PRIORITY_CANDIDATES = ['content_priority', 'priority'];
 const ID_CANDIDATES       = ['hotel_id', 'propertyid', 'property_id', 'hotelid', 'objectid',
                               'agoda_hotel_id', 'property_id_agoda'];
 
-function detectCols(hdrMap) {
-  let cityIdx = -1, priorityIdx = -1, idIdx = -1;
-  for (const h of Object.keys(hdrMap)) {
-    if (cityIdx     < 0 && CITY_CANDIDATES.includes(h))     cityIdx     = hdrMap[h];
-    if (priorityIdx < 0 && PRIORITY_CANDIDATES.includes(h)) priorityIdx = hdrMap[h];
-    if (idIdx       < 0 && ID_CANDIDATES.includes(h))       idIdx       = hdrMap[h];
+/**
+ * record 객체의 key 배열에서 city/priority/id 컬럼의 실제 키 이름을 반환.
+ * (csv-parse columns:true 사용 시 hdrMap 대신 원본 컬럼명 직접 검색)
+ */
+function detectColKeys(recordKeys) {
+  let cityKey = null, priorityKey = null, idKey = null;
+  for (const k of recordKeys) {
+    const kn = k.trim().toLowerCase().replace(/\s+/g, '_');
+    if (!cityKey     && CITY_CANDIDATES.includes(kn))     cityKey     = k;
+    if (!priorityKey && PRIORITY_CANDIDATES.includes(kn)) priorityKey = k;
+    if (!idKey       && ID_CANDIDATES.includes(kn))       idKey       = k;
   }
-  return { cityIdx, priorityIdx, idIdx };
+  return { cityKey, priorityKey, idKey };
 }
 
 // ── 호텔 성과 점수 (휴리스틱) ─────────────────────────────────────────────────
@@ -139,10 +136,12 @@ function detectCols(hdrMap) {
  * content_priority, price_min 기반 휴리스틱.
  * perfData(state/kpi/hotel-performance.json)가 있으면 clicks/bookings/commission 가중치 추가.
  */
-function scoreHotel(fields, hdrMap, perfData) {
+function scoreHotel(record, perfData) {
   const get = col => {
-    const idx = hdrMap[col];
-    return idx !== undefined ? (fields[idx] || '').trim() : '';
+    // find matching key case-insensitively
+    const kn = col.toLowerCase();
+    const key = Object.keys(record).find(k => k.toLowerCase().replace(/\s+/g, '_') === kn);
+    return key ? (record[key] || '').trim() : '';
   };
 
   let score = 50;
@@ -153,15 +152,14 @@ function scoreHotel(fields, hdrMap, perfData) {
   const pri   = get('content_priority').toLowerCase();
   const price = parseInt(get('price_min'))      || 0;
 
-  score += star  * 5;                                        // 최대 +25
-  score += rv    * 3;                                        // 최대 +30
-  score += rn > 0 ? Math.log10(rn) * 5 : 0;               // log scale
+  score += star  * 5;
+  score += rv    * 3;
+  score += rn > 0 ? Math.log10(rn) * 5 : 0;
   score += ph >= 10 ? 10 : ph >= 5 ? 5 : 0;
   score += pri === 'high' ? 20 : pri === 'low' ? -10 : 0;
   score += price > 200000 ? 10 : (price > 0 && price < 80000) ? 5 : 0;
 
   if (perfData) {
-    // hotel_id 또는 agoda_hotel_id 로 KPI 조회
     const id = get('hotel_id') || get('propertyid') || get('property_id') || get('agoda_hotel_id');
     const p  = perfData[id];
     if (p) {
@@ -213,33 +211,44 @@ function isOnCooldown(hotelId, rotationState) {
   return (Date.now() - new Date(e.last_used_at).getTime()) / 86400000 < COOLDOWN_DAYS;
 }
 
-// ── 스트리밍 CSV 헬퍼 (1패스용) ──────────────────────────────────────────────
+// ── csv-parse 기반 스트리밍 헬퍼 ──────────────────────────────────────────────
 
-function streamCsv(filePath, { onHeader, onRow }) {
+/**
+ * csv-parse 기반 스트리밍 CSV 읽기 (멀티라인/따옴표/NUL 대응).
+ * onRecord(record_object, rowIndex) → false 이면 조기 종료.
+ * resolve({ headers, count }) 로 완료 통지.
+ */
+function streamCsvParse(filePath, onRecord) {
   return new Promise((resolve, reject) => {
-    const rl = readline.createInterface({
-      input: fs.createReadStream(filePath, { encoding: 'utf8' }),
-      crlfDelay: Infinity,
-    });
-    let hdrMap = null;
-    let done   = false;
+    let headers = null;
+    let count   = 0;
+    let stopped = false;
 
-    rl.on('line', rawLine => {
-      const line = rawLine.replace(/\u0000/g, ''); // NUL 문자 제거
-      if (done || !line.trim()) return;
-      const fields = parseCSVLine(line);
-      if (hdrMap === null) {
-        const headers = fields.map(h => h.trim().toLowerCase().replace(/\s+/g, '_'));
-        hdrMap = {};
-        headers.forEach((h, i) => { hdrMap[h] = i; });
-        if (onHeader) onHeader(headers, hdrMap);
-        return;
-      }
-      const cont = onRow(fields, hdrMap);
-      if (cont === false) { done = true; rl.close(); }
+    const parser = parse({
+      columns:            true,
+      relax_quotes:       true,
+      relax_column_count: true,
+      bom:                true,
+      skip_empty_lines:   true,
+      cast:               false,
     });
-    rl.on('close', resolve);
-    rl.on('error', reject);
+
+    parser.on('readable', () => {
+      let record;
+      while (!stopped && (record = parser.read()) !== null) {
+        if (headers === null) headers = Object.keys(record);
+        count++;
+        const cont = onRecord(record, count);
+        if (cont === false) { stopped = true; parser.destroy(); }
+      }
+    });
+    parser.on('end',   () => resolve({ headers: headers || [], count }));
+    parser.on('error', err  => { if (stopped) resolve({ headers: headers || [], count }); else reject(err); });
+    parser.on('close', ()  => resolve({ headers: headers || [], count }));
+
+    fs.createReadStream(filePath, { highWaterMark: 64 * 1024 })
+      .pipe(createNulStrip())
+      .pipe(parser);
   });
 }
 
@@ -247,41 +256,39 @@ function streamCsv(filePath, { onHeader, onRow }) {
 
 async function countCities() {
   const cityCount = new Map();
-  let cityIdx     = -1;
+  let cityKey = null;
 
-  await streamCsv(INPUT_CSV, {
-    onHeader(_, hdrMap) { ({ cityIdx } = detectCols(hdrMap)); },
-    onRow(fields) {
-      if (cityIdx < 0) return;
-      const norm = normalizeCity(fields[cityIdx] || '');
-      if (norm) cityCount.set(norm, (cityCount.get(norm) || 0) + 1);
-    },
+  await streamCsvParse(INPUT_CSV, (record, i) => {
+    if (i === 1) {
+      ({ cityKey } = detectColKeys(Object.keys(record)));
+    }
+    if (!cityKey) return;
+    const norm = normalizeCity(record[cityKey] || '');
+    if (norm) cityCount.set(norm, (cityCount.get(norm) || 0) + 1);
   });
 
-  return cityIdx >= 0 ? cityCount : null;
+  return cityKey ? cityCount : null;
 }
 
 // ── 패스 1B: 점수 수집 (performance 모드) ────────────────────────────────────
 
 async function collectScores(targetCities, targetsRaw, perfData, rotationState) {
   const scores = new Map();
-  let cityIdx = -1, idIdx = -1;
+  let cityKey = null, idKey = null;
 
-  await streamCsv(INPUT_CSV, {
-    onHeader(_, hdrMap) {
-      ({ cityIdx, idIdx } = detectCols(hdrMap));
-    },
-    onRow(fields, hdrMap) {
-      if (idIdx < 0) return;
-      if (targetCities && targetCities.size > 0 && cityIdx >= 0) {
-        if (!cityMatches(fields[cityIdx] || '', targetCities, targetsRaw)) return;
-      }
-      const id = (fields[idIdx] || '').trim();
-      if (!id || scores.has(id)) return;
-      let sc = scoreHotel(fields, hdrMap, perfData);
-      if (isOnCooldown(id, rotationState)) sc *= 0.1; // 큰 페널티
-      scores.set(id, sc);
-    },
+  await streamCsvParse(INPUT_CSV, (record, i) => {
+    if (i === 1) {
+      ({ cityKey, idKey } = detectColKeys(Object.keys(record)));
+    }
+    if (!idKey) return;
+    if (targetCities && targetCities.size > 0 && cityKey) {
+      if (!cityMatches(record[cityKey] || '', targetCities, targetsRaw)) return;
+    }
+    const id = (record[idKey] || '').trim();
+    if (!id || scores.has(id)) return;
+    let sc = scoreHotel(record, perfData);
+    if (isOnCooldown(id, rotationState)) sc *= 0.1;
+    scores.set(id, sc);
   });
 
   return scores;
@@ -294,107 +301,120 @@ async function extractPass(targetCities, targetsRaw, allowedIds, rotationState) 
   fs.mkdirSync(path.dirname(OUTPUT_CSV), { recursive: true });
   const ws = fs.createWriteStream(tmpPath, { encoding: 'utf8' });
 
-  let hdrMap = null, cityIdx = -1, priorityIdx = -1, idIdx = -1;
-  let totalRead = 0, totalWritten = 0;
-  const seenIds = new Set();
-  const usedIds = new Set();
-  const cityDist = new Map();    // 도시 분포 (리포트용)
-  const rawCitySamples = [];     // 0행 디버그용 rawCity 샘플 (최대 10개)
+  let headers      = null;
+  let cityKey      = null;
+  let priorityKey  = null;
+  let idKey        = null;
+  let totalRead    = 0;
+  let totalWritten = 0;
+  const seenIds        = new Set();
+  const usedIds        = new Set();
+  const cityDist       = new Map();
+  const rawCitySamples = [];
   let done = false;
 
   await new Promise((resolve, reject) => {
-    const rl = readline.createInterface({
-      input: fs.createReadStream(INPUT_CSV, { encoding: 'utf8' }),
-      crlfDelay: Infinity,
+    let stopped = false;
+
+    const parser = parse({
+      columns:            true,
+      relax_quotes:       true,
+      relax_column_count: true,
+      bom:                true,
+      skip_empty_lines:   true,
+      cast:               false,
     });
 
-    rl.on('line', rawLine => {
-      const line = rawLine.replace(/\u0000/g, ''); // NUL 문자 제거
-      if (done || !line.trim()) return;
-      const fields = parseCSVLine(line);
+    parser.on('readable', () => {
+      let record;
+      while (!stopped && (record = parser.read()) !== null) {
+        // ── 첫 레코드에서 헤더/컬럼 감지 ────────────────────────────────
+        if (headers === null) {
+          headers = Object.keys(record);
+          ({ cityKey, priorityKey, idKey } = detectColKeys(headers));
 
-      // ── 헤더 ─────────────────────────────────────────────────────────────
-      if (hdrMap === null) {
-        const headers = fields.map(h => h.trim().toLowerCase().replace(/\s+/g, '_'));
-        hdrMap = {};
-        headers.forEach((h, i) => { hdrMap[h] = i; });
-        ({ cityIdx, priorityIdx, idIdx } = detectCols(hdrMap));
-
-        if (cityIdx < 0 && !allowedIds) {
-          ws.end();
-          try { fs.unlinkSync(tmpPath); } catch {}
-          reject(new Error(
-            `city 컬럼을 찾지 못했습니다.\n` +
-            `  검색한 이름: ${CITY_CANDIDATES.join(', ')}\n` +
-            `  실제 헤더(처음 10개): ${headers.slice(0, 10).join(', ')}`
-          ));
-          return;
+          if (!cityKey && !allowedIds) {
+            ws.end();
+            try { fs.unlinkSync(tmpPath); } catch {}
+            stopped = true;
+            parser.destroy();
+            reject(new Error(
+              `city 컬럼을 찾지 못했습니다.\n` +
+              `  검색한 이름: ${CITY_CANDIDATES.join(', ')}\n` +
+              `  실제 헤더(처음 10개): ${headers.slice(0, 10).join(', ')}`
+            ));
+            return;
+          }
+          console.log(
+            `  헤더 감지 — city:"${cityKey || 'N/A'}"` +
+            (priorityKey ? ` / priority:"${priorityKey}"` : '') +
+            (idKey       ? ` / id:"${idKey}"` : '')
+          );
+          // 출력 헤더 쓰기
+          ws.write(headers.map(escapeCSV).join(',') + '\n');
         }
-        console.log(
-          `  헤더 감지 — city[${cityIdx}]:"${cityIdx >= 0 ? headers[cityIdx] : 'N/A'}"` +
-          (priorityIdx >= 0 ? ` / priority[${priorityIdx}]` : '') +
-          (idIdx >= 0 ? ` / id[${idIdx}]` : '')
-        );
-        ws.write(fields.map(escapeCSV).join(',') + '\n');
-        return;
-      }
 
-      // ── 진행 로그 ─────────────────────────────────────────────────────────
-      totalRead++;
-      if (totalRead % LOG_EVERY === 0) {
-        process.stdout.write(
-          `\r  읽기: ${totalRead.toLocaleString()}행 | 추출: ${totalWritten.toLocaleString()}행 | ID: ${seenIds.size.toLocaleString()}`
-        );
-      }
+        // ── 진행 로그 ─────────────────────────────────────────────────
+        totalRead++;
+        if (totalRead % LOG_EVERY === 0) {
+          process.stdout.write(
+            `\r  읽기: ${totalRead.toLocaleString()}행 | 추출: ${totalWritten.toLocaleString()}행 | ID: ${seenIds.size.toLocaleString()}`
+          );
+        }
 
-      // 상한 도달 → 조기 종료
-      if (totalWritten >= MAX_ROWS || seenIds.size >= MAX_HOTELS) {
-        if (!done) { done = true; rl.close(); }
-        return;
-      }
+        // 상한 도달 → 조기 종료
+        if (totalWritten >= MAX_ROWS || seenIds.size >= MAX_HOTELS) {
+          if (!done) { done = stopped = true; parser.destroy(); }
+          continue;
+        }
 
-      // ── 도시 필터 (allowedIds가 없을 때만) ────────────────────────────────
-      if (!allowedIds && targetCities && targetCities.size > 0 && cityIdx >= 0) {
-        const rowCityRaw = (fields[cityIdx] || '').trim();
-        // 0행 디버그용 샘플 수집 (최대 10개)
-        if (rawCitySamples.length < 10 && rowCityRaw) rawCitySamples.push(rowCityRaw);
-        if (!cityMatches(rowCityRaw, targetCities, targetsRaw)) return;
-      }
+        // ── 도시 필터 ─────────────────────────────────────────────────
+        if (!allowedIds && targetCities && targetCities.size > 0 && cityKey) {
+          const rowCityRaw = (record[cityKey] || '').trim();
+          if (rawCitySamples.length < 10 && rowCityRaw) rawCitySamples.push(rowCityRaw);
+          if (!cityMatches(rowCityRaw, targetCities, targetsRaw)) continue;
+        }
 
-      // ── allowedIds 필터 (global/performance 모드) ─────────────────────────
-      const id = idIdx >= 0 ? (fields[idIdx] || '').trim() : '';
-      if (allowedIds && (!id || !allowedIds.has(id))) return;
+        // ── allowedIds 필터 ───────────────────────────────────────────
+        const id = idKey ? (record[idKey] || '').trim() : '';
+        if (allowedIds && (!id || !allowedIds.has(id))) continue;
 
-      // ── hotel_id 중복 제거 ────────────────────────────────────────────────
-      if (id) {
-        if (seenIds.has(id)) return;
-        seenIds.add(id);
-      }
+        // ── hotel_id 중복 제거 ────────────────────────────────────────
+        if (id) {
+          if (seenIds.has(id)) continue;
+          seenIds.add(id);
+        }
 
-      // ── Rotation 냉각 제외 ────────────────────────────────────────────────
-      if (id && isOnCooldown(id, rotationState)) return;
+        // ── Rotation 냉각 제외 ────────────────────────────────────────
+        if (id && isOnCooldown(id, rotationState)) continue;
 
-      // ── content_priority 필터 ─────────────────────────────────────────────
-      if (priorityIdx >= 0) {
-        const pv = (fields[priorityIdx] || '').toLowerCase().trim();
-        if (pv && pv !== 'high' && pv !== 'normal') return;
-      }
+        // ── content_priority 필터 ─────────────────────────────────────
+        if (priorityKey) {
+          const pv = (record[priorityKey] || '').toLowerCase().trim();
+          if (pv && pv !== 'high' && pv !== 'normal') continue;
+        }
 
-      ws.write(fields.map(escapeCSV).join(',') + '\n');
-      totalWritten++;
-      if (id) usedIds.add(id);
+        // ── 출력 ──────────────────────────────────────────────────────
+        ws.write(headers.map(h => escapeCSV(record[h] ?? '')).join(',') + '\n');
+        totalWritten++;
+        if (id) usedIds.add(id);
 
-      // 도시 분포 기록
-      if (cityIdx >= 0) {
-        const norm = normalizeCity(fields[cityIdx] || '');
-        cityDist.set(norm, (cityDist.get(norm) || 0) + 1);
+        if (cityKey) {
+          const norm = normalizeCity(record[cityKey] || '');
+          cityDist.set(norm, (cityDist.get(norm) || 0) + 1);
+        }
       }
     });
 
-    rl.on('close', () => { ws.end(); });
+    parser.on('end',   () => { ws.end(); });
+    parser.on('error', err  => { if (stopped) { ws.end(); } else reject(err); });
+    parser.on('close', ()  => { ws.end(); });
     ws.on('finish', resolve);
-    rl.on('error', reject);
     ws.on('error', reject);
+
+    fs.createReadStream(INPUT_CSV, { highWaterMark: 64 * 1024 })
+      .pipe(createNulStrip())
+      .pipe(parser);
   });
 
   fs.renameSync(tmpPath, OUTPUT_CSV);

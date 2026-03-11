@@ -234,21 +234,17 @@ test('buildPartnerUrl: agodaId도 없으면 빈값', () => {
 });
 
 test('detectColMap: Agoda 포맷 컬럼 탐지', () => {
-  const hdr = {};
-  ['objectid', 'propertyname', 'cityname', 'countryname', 'address', 'landingurl']
-    .forEach((h, i) => { hdr[h] = i; });
-  const m = detectColMap(hdr);
-  assert(m.agoda_hotel_id === 0, `agoda_hotel_id idx: ${m.agoda_hotel_id}`);
-  assert(m.hotel_name_en  === 1, `hotel_name_en idx: ${m.hotel_name_en}`);
-  assert(m.city           === 2, `city idx: ${m.city}`);
-  assert(m.landing_url    === 5, `landing_url idx: ${m.landing_url}`);
+  const keys = ['objectid', 'propertyname', 'cityname', 'countryname', 'address', 'landingurl'];
+  const m = detectColMap(keys);
+  assert(m.agoda_hotel_id === 'objectid',    `agoda_hotel_id key: ${m.agoda_hotel_id}`);
+  assert(m.hotel_name_en  === 'propertyname',`hotel_name_en key: ${m.hotel_name_en}`);
+  assert(m.city           === 'cityname',    `city key: ${m.city}`);
+  assert(m.landing_url    === 'landingurl',  `landing_url key: ${m.landing_url}`);
 });
 
 test('detectColMap: Tripprice 내부 포맷 컬럼 탐지', () => {
-  const hdr = {};
-  ['hotel_id', 'hotel_name', 'city', 'country', 'address', 'agoda_hotel_id']
-    .forEach((h, i) => { hdr[h] = i; });
-  const m = detectColMap(hdr);
+  const keys = ['hotel_id', 'hotel_name', 'city', 'country', 'address', 'agoda_hotel_id'];
+  const m = detectColMap(keys);
   assert(m.agoda_hotel_id !== undefined, 'agoda_hotel_id 탐지 실패');
   assert(m.city           !== undefined, 'city 탐지 실패');
 });

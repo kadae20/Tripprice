@@ -3,7 +3,7 @@
  * hoteldata-to-tripprice.js
  *
  * Agoda 원본 subset CSV → Tripprice ingest 포맷 CSV 변환.
- * readline 스트리밍 처리 (대용량 메모리 안전, OOM 없음).
+ * csv-parse 스트리밍 처리 (멀티라인/따옴표/NUL 대응, OOM 없음).
  *
  * 입력:  data/hotels/hotels-subset.csv  (Agoda 원본 컬럼)
  * 출력:  data/hotels/tripprice-hotels.csv (Tripprice ingest 스키마)
@@ -18,7 +18,8 @@
 
 const fs       = require('fs');
 const path     = require('path');
-const readline = require('readline');
+const { parse }     = require('csv-parse');
+const { Transform } = require('stream');
 
 const ROOT       = path.resolve(__dirname, '..');
 const INPUT_CSV  = path.resolve(ROOT, process.env.HOTELDATA_SUBSET_CSV    || 'data/hotels/hotels-subset.csv');
@@ -113,39 +114,39 @@ const CANDIDATES = {
   rates_currency:  ['ratescurrency', 'rates_currency', 'currency'],
 };
 
-// ── CSV 유틸 (RFC 4180) ───────────────────────────────────────────────────────
-function parseCSVLine(line) {
-  const fields = [];
-  let cur = '', inQ = false;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (inQ) {
-      if (c === '"' && line[i + 1] === '"') { cur += '"'; i++; }
-      else if (c === '"') { inQ = false; }
-      else { cur += c; }
-    } else {
-      if (c === '"') { inQ = true; }
-      else if (c === ',') { fields.push(cur); cur = ''; }
-      else { cur += c; }
-    }
-  }
-  fields.push(cur);
-  return fields;
+// ── NUL 문자 제거 Transform ───────────────────────────────────────────────────
+
+function createNulStrip() {
+  return new Transform({
+    transform(chunk, enc, cb) {
+      cb(null, chunk.toString('utf8').replace(/\u0000/g, ''));
+    },
+  });
 }
+
+// ── CSV 유틸 (RFC 4180) ───────────────────────────────────────────────────────
 
 function escapeCSV(val) {
   const s = String(val ?? '');
   return /[,"\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-// ── 컬럼 인덱스 탐지 (헤더 정규화 후 후보 매칭) ──────────────────────────────
-function detectColMap(normalizedHeaders) {
-  // normalizedHeaders: { colName → index }
+// ── 컬럼 키 탐지 (recordKeys 배열 → { fieldName: originalColumnKey }) ─────────
+/**
+ * recordKeys: csv-parse columns:true 결과의 원본 컬럼명 배열.
+ * 반환: { fieldName: originalColumnKey } — 값은 원본 키 이름(string).
+ */
+function detectColMap(recordKeys) {
   const idx = {};
+  // Build normalized → original key map
+  const normToOrig = {};
+  for (const k of recordKeys) {
+    normToOrig[k.trim().toLowerCase().replace(/\s+/g, '_')] = k;
+  }
   for (const [field, candidates] of Object.entries(CANDIDATES)) {
     for (const c of candidates) {
-      if (normalizedHeaders[c] !== undefined) {
-        idx[field] = normalizedHeaders[c];
+      if (normToOrig[c] !== undefined) {
+        idx[field] = normToOrig[c]; // stores original key name
         break;
       }
     }
@@ -220,122 +221,116 @@ async function main() {
   const samples = [];            // 리포트용 샘플 (최대 10개)
   const slugMap = new Map();     // 슬러그 충돌 카운터
 
-  let colMap  = null;
-  let normHdr = null;
+  let colMap     = null;
+  let csvHeaders = null;
 
   await new Promise((resolve, reject) => {
-    const rl = readline.createInterface({
-      input:     fs.createReadStream(INPUT_CSV, { encoding: 'utf8' }),
-      crlfDelay: Infinity,
+    let initialized = false;
+    let stopped     = false;
+
+    const parser = parse({
+      columns:            true,
+      relax_quotes:       true,
+      relax_column_count: true,
+      bom:                true,
+      skip_empty_lines:   true,
+      cast:               false,
     });
 
-    rl.on('line', rawLine => {
-      const line = rawLine.replace(/\u0000/g, ''); // NUL 문자 제거 (컬럼 밀림 방지)
-      if (!line.trim()) return;
-      const fields = parseCSVLine(line);
+    parser.on('readable', () => {
+      let record;
+      while (!stopped && (record = parser.read()) !== null) {
+        // ── 첫 레코드에서 컬럼 탐지 ────────────────────────────────────
+        if (!initialized) {
+          csvHeaders = Object.keys(record);
+          colMap     = detectColMap(csvHeaders);
+          const detected = Object.entries(colMap)
+            .filter(([k]) => !['hotel_name_local', 'landing_url'].includes(k))
+            .map(([k, v]) => `${k}[${v}]`)
+            .join(' ');
+          console.log(`  컬럼 탐지: ${detected || '(탐지 실패 — 헤더 확인 필요)'}`);
+          console.log('');
+          ws.write(OUTPUT_HEADERS.map(escapeCSV).join(',') + '\n');
+          initialized = true;
+        }
 
-      // ── 헤더 처리 (첫 번째 행) ───────────────────────────────────────────
-      if (normHdr === null) {
-        normHdr = {};
-        fields.forEach((h, i) => {
-          const k = h.trim().toLowerCase().replace(/\s+/g, '_');
-          normHdr[k] = i;
-        });
-        colMap = detectColMap(normHdr);
+        // ── 데이터 행 처리 ──────────────────────────────────────────────
+        totalRead++;
 
-        const detected = Object.entries(colMap)
-          .filter(([k]) => !['hotel_name_local', 'landing_url'].includes(k))
-          .map(([k, v]) => `${k}[${v}]`)
-          .join(' ');
-        console.log(`  컬럼 탐지: ${detected || '(탐지 실패 — 헤더 확인 필요)'}`);
-        console.log('');
+        const get = col => {
+          const key = colMap[col];
+          return key ? (record[key] || '').trim() : '';
+        };
 
-        // 출력 헤더 쓰기
-        ws.write(OUTPUT_HEADERS.map(escapeCSV).join(',') + '\n');
-        return;
-      }
+        // 빈 행 건너뜀
+        if (Object.values(record).every(v => !String(v || '').trim())) {
+          totalSkipped++;
+          continue;
+        }
 
-      // ── 데이터 행 처리 ────────────────────────────────────────────────────
-      totalRead++;
+        // Agoda 숫자 ID
+        const agodaId = get('agoda_hotel_id');
 
-      // 빈 행 건너뜀
-      if (fields.every(f => !f.trim())) { totalSkipped++; return; }
+        // 호텔명: 영문 우선, 없으면 현지어
+        const nameEn    = get('hotel_name_en');
+        const nameLocal = get('hotel_name_local');
+        const hotelName = nameEn || nameLocal;
 
-      const get = col => {
-        const idx = colMap[col];
-        return idx !== undefined ? (fields[idx] || '').trim() : '';
-      };
+        if (!hotelName) {
+          totalSkipped++;
+          const k = '필수 누락: hotel_name 계열 컬럼 없음';
+          missingFieldCount[k] = (missingFieldCount[k] || 0) + 1;
+          continue;
+        }
 
-      // Agoda 숫자 ID
-      const agodaId = get('agoda_hotel_id');
+        // 도시/국가 (소문자 정규화)
+        const city    = get('city').toLowerCase().trim();
+        const country = get('country').toLowerCase().trim();
 
-      // 호텔명: 영문 우선, 없으면 현지어
-      const nameEn    = get('hotel_name_en');
-      const nameLocal = get('hotel_name_local');
-      const hotelName = nameEn || nameLocal;
+        // hotel_id 슬러그 생성
+        const slugBase = nameEn || nameLocal.replace(/[^\x00-\x7F]/g, '').trim();
+        const rawSlug  = slugBase
+          ? slugify(`${slugBase}-${city}`)
+          : (agodaId ? `agoda-${agodaId}` : slugify(`hotel-${city}`));
+        const baseSlug = rawSlug || (agodaId ? `agoda-${agodaId}` : 'hotel');
 
-      if (!hotelName) {
-        totalSkipped++;
-        const k = '필수 누락: hotel_name 계열 컬럼 없음';
-        missingFieldCount[k] = (missingFieldCount[k] || 0) + 1;
-        return;
-      }
+        let hotelId;
+        if (slugMap.has(baseSlug)) {
+          const n = slugMap.get(baseSlug) + 1;
+          slugMap.set(baseSlug, n);
+          hotelId = `${baseSlug}-${n}`;
+        } else {
+          slugMap.set(baseSlug, 1);
+          hotelId = baseSlug;
+        }
 
-      // 도시/국가 (소문자 정규화)
-      const city    = get('city').toLowerCase().trim();
-      const country = get('country').toLowerCase().trim();
+        // address
+        const rawAddress = get('address');
+        const address    = rawAddress || [city, country].filter(Boolean).join(', ');
+        if (!rawAddress) {
+          const k = 'address 폴백 (city+country 대체)';
+          missingFieldCount[k] = (missingFieldCount[k] || 0) + 1;
+        }
 
-      // hotel_id 슬러그 생성
-      // 비ASCII 한국어 등 이름은 ASCII 부분만 사용 → 없으면 agoda-{id}
-      const slugBase = nameEn || nameLocal.replace(/[^\x00-\x7F]/g, '').trim();
-      const rawSlug  = slugBase
-        ? slugify(`${slugBase}-${city}`)
-        : (agodaId ? `agoda-${agodaId}` : slugify(`hotel-${city}`));
-      const baseSlug = rawSlug || (agodaId ? `agoda-${agodaId}` : 'hotel');
+        if (!agodaId) {
+          const k = 'agoda_hotel_id 없음 (partner_url 생성 제한)';
+          missingFieldCount[k] = (missingFieldCount[k] || 0) + 1;
+        }
 
-      // 충돌 처리: 같은 슬러그 두 번째 이상은 -2, -3 suffix
-      let hotelId;
-      if (slugMap.has(baseSlug)) {
-        const n = slugMap.get(baseSlug) + 1;
-        slugMap.set(baseSlug, n);
-        hotelId = `${baseSlug}-${n}`;
-      } else {
-        slugMap.set(baseSlug, 1);
-        hotelId = baseSlug;
-      }
+        const landingUrl = get('landing_url');
+        const partnerUrl = buildPartnerUrl(landingUrl, agodaId, hotelId);
+        if (!partnerUrl) {
+          const k = 'partner_url 생성 불가';
+          missingFieldCount[k] = (missingFieldCount[k] || 0) + 1;
+        }
 
-      // address: 원본 우선, 없으면 city + country 폴백 (빈값 금지)
-      const rawAddress = get('address');
-      const address    = rawAddress || [city, country].filter(Boolean).join(', ');
-      if (!rawAddress) {
-        const k = 'address 폴백 (city+country 대체)';
-        missingFieldCount[k] = (missingFieldCount[k] || 0) + 1;
-      }
-
-      // agoda_hotel_id 누락 집계
-      if (!agodaId) {
-        const k = 'agoda_hotel_id 없음 (partner_url 생성 제한)';
-        missingFieldCount[k] = (missingFieldCount[k] || 0) + 1;
-      }
-
-      // partner_url 생성
-      const landingUrl = get('landing_url');
-      const partnerUrl = buildPartnerUrl(landingUrl, agodaId, hotelId);
-      if (!partnerUrl) {
-        const k = 'partner_url 생성 불가';
-        missingFieldCount[k] = (missingFieldCount[k] || 0) + 1;
-      }
-
-      // photo1~5: 개별 컬럼에서 가져오거나, photos JSON 배열 파싱 시도
-      const photoVals = [1, 2, 3, 4, 5].map(n => get(`photo${n}`));
-      // photos JSON 배열 폴백: photo1~5가 모두 비어있고 photos 컬럼이 JSON 배열이면 파싱
-      if (photoVals.every(v => !v)) {
-        const photosCol = Object.keys(colMap).find(k => k === 'photos');
-        if (photosCol === undefined) {
-          // photos 컬럼 직접 탐지
-          const photosIdx = normHdr['photos'];
-          if (photosIdx !== undefined) {
-            const photosRaw = (fields[photosIdx] || '').trim();
+        // photo1~5
+        const photoVals = [1, 2, 3, 4, 5].map(n => get(`photo${n}`));
+        if (photoVals.every(v => !v)) {
+          // photos JSON 배열 폴백
+          const photosKey = colMap['photos'] || Object.keys(record).find(k => k.trim().toLowerCase() === 'photos');
+          if (photosKey) {
+            const photosRaw = (record[photosKey] || '').trim();
             try {
               const arr = JSON.parse(photosRaw);
               if (Array.isArray(arr)) {
@@ -346,70 +341,70 @@ async function main() {
             } catch { /* not JSON */ }
           }
         }
-      }
 
-      // photos_count: 우선 원본 컬럼 → photo1~5 비어있지 않은 수 계산
-      let photosCount = get('photos_count');
-      if (!photosCount) {
-        const nonEmpty = photoVals.filter(v => v).length;
-        photosCount = nonEmpty > 0 ? String(nonEmpty) : '';
-      }
+        let photosCount = get('photos_count');
+        if (!photosCount) {
+          const nonEmpty = photoVals.filter(v => v).length;
+          photosCount = nonEmpty > 0 ? String(nonEmpty) : '';
+        }
 
-      // 출력 행 조립
-      const row = [
-        hotelId,
-        hotelName,                                 // hotel_name (표시용)
-        nameEn,                                    // hotel_name_en
-        city,
-        country,
-        address,
-        agodaId,                                   // agoda_hotel_id
-        partnerUrl,                                // partner_url
-        partnerUrl,                                // source_url (= partner_url)
-        get('star_rating'),
-        get('review_score'),
-        get('review_count'),
-        photosCount,                               // photos_count (계산된 값)
-        get('latitude'),
-        get('longitude'),
-        get('price_min'),
-        get('currency'),
-        get('checkin_time'),
-        get('checkout_time'),
-        get('overview'),
-        get('numberrooms'),
-        get('chain_name'),
-        photoVals[0],                              // photo1
-        photoVals[1],                              // photo2
-        photoVals[2],                              // photo3
-        photoVals[3],                              // photo4
-        photoVals[4],                              // photo5
-        get('rating_average'),                     // rating_average (원본)
-        get('number_of_reviews'),                  // number_of_reviews (원본)
-        get('rates_from'),                         // rates_from
-        get('rates_currency'),                     // rates_currency
-        get('content_priority') || 'normal',
-        'agoda-hoteldata',
-      ];
+        const row = [
+          hotelId,
+          hotelName,
+          nameEn,
+          city,
+          country,
+          address,
+          agodaId,
+          partnerUrl,
+          partnerUrl,
+          get('star_rating'),
+          get('review_score'),
+          get('review_count'),
+          photosCount,
+          get('latitude'),
+          get('longitude'),
+          get('price_min'),
+          get('currency'),
+          get('checkin_time'),
+          get('checkout_time'),
+          get('overview'),
+          get('numberrooms'),
+          get('chain_name'),
+          photoVals[0],
+          photoVals[1],
+          photoVals[2],
+          photoVals[3],
+          photoVals[4],
+          get('rating_average'),
+          get('number_of_reviews'),
+          get('rates_from'),
+          get('rates_currency'),
+          get('content_priority') || 'normal',
+          'agoda-hoteldata',
+        ];
 
-      ws.write(row.map(escapeCSV).join(',') + '\n');
-      totalWritten++;
+        ws.write(row.map(escapeCSV).join(',') + '\n');
+        totalWritten++;
 
-      // 샘플 수집
-      if (samples.length < 10) {
-        samples.push({ hotel_id: hotelId, hotel_name: hotelName, city, agoda_hotel_id: agodaId, partner_url: partnerUrl, address });
-      }
+        if (samples.length < 10) {
+          samples.push({ hotel_id: hotelId, hotel_name: hotelName, city, agoda_hotel_id: agodaId, partner_url: partnerUrl, address });
+        }
 
-      // 진행 표시 (1000행마다)
-      if (totalRead % 1000 === 0) {
-        process.stdout.write(`\r  처리: ${totalRead.toLocaleString()}행 | 변환: ${totalWritten.toLocaleString()}`);
+        if (totalRead % 1000 === 0) {
+          process.stdout.write(`\r  처리: ${totalRead.toLocaleString()}행 | 변환: ${totalWritten.toLocaleString()}`);
+        }
       }
     });
 
-    rl.on('close', () => ws.end());
+    parser.on('end',   () => ws.end());
+    parser.on('error', err  => { if (stopped) ws.end(); else reject(err); });
     ws.on('finish', resolve);
-    rl.on('error', reject);
     ws.on('error', reject);
+
+    fs.createReadStream(INPUT_CSV, { highWaterMark: 64 * 1024 })
+      .pipe(createNulStrip())
+      .pipe(parser);
   });
 
   if (totalRead > 0) process.stdout.write('\n');
