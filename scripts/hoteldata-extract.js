@@ -307,10 +307,11 @@ async function extractPass(targetCities, targetsRaw, allowedIds, rotationState) 
   let idKey        = null;
   let totalRead    = 0;
   let totalWritten = 0;
-  const seenIds        = new Set();
-  const usedIds        = new Set();
-  const cityDist       = new Map();
-  const rawCitySamples = [];
+  const seenIds         = new Set(); // CSV 전체 dedup (중복 행 건너뜀)
+  const uniqueExtracted = new Set(); // 모든 필터 통과 후 실제 추출된 호텔 (MAX_HOTELS 기준)
+  const usedIds         = new Set(); // rotation 기록용 (= uniqueExtracted)
+  const cityDist        = new Map();
+  const rawCitySamples  = [];
   let done = false;
 
   await new Promise((resolve, reject) => {
@@ -358,12 +359,12 @@ async function extractPass(targetCities, targetsRaw, allowedIds, rotationState) 
         totalRead++;
         if (totalRead % LOG_EVERY === 0) {
           process.stdout.write(
-            `\r  읽기: ${totalRead.toLocaleString()}행 | 추출: ${totalWritten.toLocaleString()}행 | ID: ${seenIds.size.toLocaleString()}`
+            `\r  읽기: ${totalRead.toLocaleString()}행 | 추출: ${totalWritten.toLocaleString()}행 | ID: ${uniqueExtracted.size.toLocaleString()}`
           );
         }
 
-        // 상한 도달 → 조기 종료
-        if (totalWritten >= MAX_ROWS || seenIds.size >= MAX_HOTELS) {
+        // 상한 도달 → 조기 종료 (uniqueExtracted = 실제 추출된 유니크 호텔 수)
+        if (totalWritten >= MAX_ROWS || uniqueExtracted.size >= MAX_HOTELS) {
           if (!done) { done = stopped = true; parser.destroy(); }
           continue;
         }
@@ -379,7 +380,7 @@ async function extractPass(targetCities, targetsRaw, allowedIds, rotationState) 
         const id = idKey ? (record[idKey] || '').trim() : '';
         if (allowedIds && (!id || !allowedIds.has(id))) continue;
 
-        // ── hotel_id 중복 제거 ────────────────────────────────────────
+        // ── hotel_id 중복 제거 (CSV 전체 기준 dedup) ─────────────────
         if (id) {
           if (seenIds.has(id)) continue;
           seenIds.add(id);
@@ -394,10 +395,13 @@ async function extractPass(targetCities, targetsRaw, allowedIds, rotationState) 
           if (pv && pv !== 'high' && pv !== 'normal') continue;
         }
 
-        // ── 출력 ──────────────────────────────────────────────────────
+        // ── 출력 (모든 필터 통과) ─────────────────────────────────────
         ws.write(headers.map(h => escapeCSV(record[h] ?? '')).join(',') + '\n');
         totalWritten++;
-        if (id) usedIds.add(id);
+        if (id) {
+          uniqueExtracted.add(id); // 실제 추출된 유니크 호텔 카운터
+          usedIds.add(id);
+        }
 
         if (cityKey) {
           const norm = normalizeCity(record[cityKey] || '');
@@ -418,12 +422,12 @@ async function extractPass(targetCities, targetsRaw, allowedIds, rotationState) 
   });
 
   fs.renameSync(tmpPath, OUTPUT_CSV);
-  return { totalRead, totalWritten, seenIds, usedIds, cityDist, rawCitySamples };
+  return { totalRead, totalWritten, uniqueExtracted, usedIds, cityDist, rawCitySamples };
 }
 
 // ── 리포트 생성 ───────────────────────────────────────────────────────────────
 
-function generateReport({ totalRead, totalWritten, seenIds, cityDist, rawCitySamples }, mode, inputSizeMB, targetsRaw) {
+function generateReport({ totalRead, totalWritten, uniqueExtracted, cityDist, rawCitySamples }, mode, inputSizeMB, targetsRaw) {
   const date     = new Date().toISOString().split('T')[0];
   const outStat  = fs.existsSync(OUTPUT_CSV) ? fs.statSync(OUTPUT_CSV) : null;
   const outKB    = outStat ? (outStat.size / 1024).toFixed(0) : 0;
@@ -435,7 +439,7 @@ function generateReport({ totalRead, totalWritten, seenIds, cityDist, rawCitySam
   md += `| 추출 모드 | ${mode} |\n`;
   md += `| 읽은 행 수 | ${totalRead.toLocaleString()} |\n`;
   md += `| 추출 행 수 | ${totalWritten.toLocaleString()} |\n`;
-  md += `| 유니크 호텔 | ${seenIds.size.toLocaleString()} |\n`;
+  md += `| 유니크 호텔 | ${uniqueExtracted.size.toLocaleString()} |\n`;
   md += `| 출력 크기 | ${outKB}KB |\n`;
   if (COOLDOWN_DAYS > 0) md += `| Rotation 냉각 | ${COOLDOWN_DAYS}일 |\n`;
   md += '\n';
@@ -528,7 +532,7 @@ async function main() {
   const stats = await extractPass(targetCities, targetsRaw, allowedIds, rotationState);
   process.stdout.write('\n');
 
-  const { totalRead, totalWritten, seenIds, usedIds } = stats;
+  const { totalRead, totalWritten, uniqueExtracted, usedIds } = stats;
 
   // Rotation state 업데이트
   if (COOLDOWN_DAYS > 0 && usedIds.size > 0) {
@@ -547,7 +551,7 @@ async function main() {
   console.log('══════════════════════════════════════════════════');
   console.log(`  읽은 행    : ${totalRead.toLocaleString()}`);
   console.log(`  추출 행    : ${totalWritten.toLocaleString()}`);
-  console.log(`  유니크 호텔: ${seenIds.size.toLocaleString()}`);
+  console.log(`  유니크 호텔: ${uniqueExtracted.size.toLocaleString()}`);
   console.log(`  출력 크기  : ${(outStat.size / 1024).toFixed(0)}KB`);
   console.log(`  출력 파일  : ${path.relative(ROOT, OUTPUT_CSV)}`);
   console.log('══════════════════════════════════════════════════');

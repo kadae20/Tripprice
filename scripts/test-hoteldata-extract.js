@@ -424,6 +424,65 @@ test('raw 한국어 city 우선 매칭 (서울 raw → cityMatches 성공)', () 
 
 try { fs.rmSync(tmpDir3, { recursive: true, force: true }); } catch {}
 
+// ── 검증 H: uniqueExtracted 기반 상한 (비타겟 15000 + 타겟 50, EXTRACT_HOTELS=10000) ──
+console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+console.log(' [H] uniqueExtracted 기반 상한 — 비타겟 대량 레코드 조기 종료 방지');
+console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+// 비타겟(도쿄) 15,000행 + 타겟(서울) 50행 CSV 생성
+const tmpDir4 = fs.mkdtempSync(path.join(require('os').tmpdir(), 'tripprice-unique-'));
+const tmpUniqueLatest = path.join(tmpDir4, 'hotels-unique-latest.csv');
+const tmpUniqueSubset = path.join(tmpDir4, 'hotels-unique-subset.csv');
+
+{
+  const lines = ['hotel_id,hotel_name,city,agoda_hotel_id,content_priority'];
+  for (let i = 0; i < 15000; i++) {
+    lines.push(`nt-${i},NonTarget Hotel ${i},도쿄,${100000 + i},normal`);
+  }
+  for (let i = 0; i < 50; i++) {
+    lines.push(`target-${i},Seoul Hotel ${i},서울,${200000 + i},normal`);
+  }
+  fs.writeFileSync(tmpUniqueLatest, lines.join('\n') + '\n', 'utf8');
+}
+
+let uniqueRunErr = false;
+let uniqueRunOutput = '';
+try {
+  uniqueRunOutput = execFileSync(process.execPath, [path.join(SCRIPTS, 'hoteldata-extract.js')], {
+    env: {
+      ...process.env,
+      HOTELDATA_LATEST_CSV:     tmpUniqueLatest,
+      HOTELDATA_SUBSET_CSV:     tmpUniqueSubset,
+      HOTELDATA_CITIES:         '서울',
+      ROTATION_COOLDOWN_DAYS:   '0',
+      HOTELDATA_EXTRACT_ROWS:   '9999',
+      HOTELDATA_EXTRACT_HOTELS: '10000',  // 타겟 50 < 10000 → 상한에 걸리지 않아야 함
+    },
+    encoding: 'utf8',
+    timeout: 60_000,
+  });
+} catch (err) {
+  uniqueRunErr = true;
+  console.error('  uniqueExtracted 테스트 extract 실패:', (err.stderr || err.stdout || err.message).slice(0, 400));
+}
+
+test('비타겟 15000행 + 타겟 50행: 조기 종료 없이 50행 모두 추출됨', () => {
+  assert(!uniqueRunErr, `extract 실패: ${uniqueRunOutput.slice(0, 200)}`);
+  assert(fs.existsSync(tmpUniqueSubset), 'subset 파일 미생성');
+  const lines = fs.readFileSync(tmpUniqueSubset, 'utf8').trim().split('\n');
+  const dataLines = lines.slice(1); // 헤더 제외
+  assert(dataLines.length === 50, `기대 50행, 실제 ${dataLines.length}행`);
+});
+
+test('비타겟 레코드(도쿄)가 subset에 포함되지 않음', () => {
+  assert(!uniqueRunErr && fs.existsSync(tmpUniqueSubset), 'subset 파일 없음');
+  const content = fs.readFileSync(tmpUniqueSubset, 'utf8');
+  assert(!content.includes('nt-0,'), '비타겟(도쿄) 호텔이 포함됨');
+  assert(content.includes('target-0,'), '타겟(서울) 호텔 미포함');
+});
+
+try { fs.rmSync(tmpDir4, { recursive: true, force: true }); } catch {}
+
 // ── 정리 ─────────────────────────────────────────────────────────────────────
 try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
 
