@@ -291,6 +291,78 @@ test('address 컬럼 없어도 변환 성공 (city+country 폴백)', () => {
   assert((rows[0].address || '').length > 0, 'address 폴백 빈값');
 });
 
+// ── 검증 D: 개행 포함 필드 — 1 레코드 = 1 라인 보장 ─────────────────────────
+console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+console.log(' [D] 개행·NUL 포함 필드 sanitize 검증');
+console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+// hotel_name에 \n, overview에 \r\n 포함
+const NEWLINE_CSV =
+  'ObjectId,PropertyName,CityName,CountryName,Overview\n' +
+  '111,"Hotel\nWith\nNewline",Seoul,South Korea,"Great hotel.\r\nVery clean."\n' +
+  '222,Normal Hotel,Busan,South Korea,No newline here\n';
+
+const tmpIn3  = path.join(tmpDir, 'newline-subset.csv');
+const tmpOut3 = path.join(tmpDir, 'newline-tripprice.csv');
+fs.writeFileSync(tmpIn3, NEWLINE_CSV, 'utf8');
+
+let newlineFailed = false;
+try {
+  execFileSync(process.execPath, [
+    path.join(SCRIPTS, 'hoteldata-to-tripprice.js'),
+  ], {
+    env: {
+      ...process.env,
+      HOTELDATA_SUBSET_CSV:    tmpIn3,
+      HOTELDATA_TRIPPRICE_CSV: tmpOut3,
+      AGODA_CID:               CID,
+    },
+    encoding: 'utf8',
+    timeout:  30_000,
+  });
+} catch (err) {
+  newlineFailed = true;
+  console.error('  newline 테스트 실패:', (err.stderr || err.message).slice(0, 200));
+}
+
+test('개행 포함 CSV: 변환 성공 (종료 코드 0)', () => {
+  assert(!newlineFailed, 'transform 실패');
+  assert(fs.existsSync(tmpOut3), '출력 파일 미생성');
+});
+
+test('개행 포함 CSV: 출력 행 수 = 2 (헤더 포함 3줄)', () => {
+  if (!fs.existsSync(tmpOut3)) return;
+  const raw   = fs.readFileSync(tmpOut3, 'utf8');
+  const lines = raw.trim().split('\n');
+  // 헤더 1줄 + 데이터 2줄
+  assert(lines.length === 3, `기대 3줄(헤더+2행), 실제 ${lines.length}줄`);
+});
+
+test('개행 포함 CSV: 각 줄이 동일 컬럼 수를 가짐 (레코드 찢김 없음)', () => {
+  if (!fs.existsSync(tmpOut3)) return;
+  const lines = fs.readFileSync(tmpOut3, 'utf8').trim().split('\n');
+  const colCount = parseCSVLine(lines[0]).length;
+  for (let i = 1; i < lines.length; i++) {
+    const n = parseCSVLine(lines[i]).length;
+    assert(n === colCount,
+      `줄 ${i + 1}의 컬럼 수 불일치: 헤더=${colCount}, 실제=${n} → "${lines[i].slice(0, 80)}"`);
+  }
+});
+
+test('sanitizeText/csvEscape: 개행 제거 후 공백 치환 확인', () => {
+  const { sanitizeText, csvEscape } = require('./hoteldata-to-tripprice');
+  const s = sanitizeText('line1\nline2\r\nline3');
+  assert(!s.includes('\n') && !s.includes('\r'),
+    `개행 미제거: "${s}"`);
+  assert(s.includes('line1') && s.includes('line2') && s.includes('line3'),
+    `텍스트 손실: "${s}"`);
+
+  const escaped = csvEscape('has,comma and "quote" and\nnewline');
+  assert(!escaped.includes('\n'), `csvEscape 개행 미제거: "${escaped}"`);
+  assert(escaped.startsWith('"') && escaped.endsWith('"'),
+    `쉼표/따옴표 포함 값이 quoted 아님: "${escaped}"`);
+});
+
 // ── 정리 ─────────────────────────────────────────────────────────────────────
 try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
 

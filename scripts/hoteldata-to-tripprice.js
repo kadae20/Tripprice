@@ -124,11 +124,21 @@ function createNulStrip() {
   });
 }
 
-// ── CSV 유틸 (RFC 4180) ───────────────────────────────────────────────────────
+// ── CSV 유틸 ──────────────────────────────────────────────────────────────────
+// NUL·개행을 제거한 뒤 RFC 4180 이스케이프.
+// 개행을 quoted 필드로 감싸는 대신 공백 치환하여 1 레코드 = 1 라인 보장.
 
-function escapeCSV(val) {
-  const s = String(val ?? '');
-  return /[,"\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+function sanitizeText(v) {
+  return String(v ?? '')
+    .replace(/\u0000/g, '')
+    .replace(/\r\n|\n|\r/g, ' ')
+    .trim();
+}
+
+function csvEscape(v) {
+  const s = sanitizeText(v);
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
 }
 
 // ── 컬럼 키 탐지 (recordKeys 배열 → { fieldName: originalColumnKey }) ─────────
@@ -250,7 +260,7 @@ async function main() {
             .join(' ');
           console.log(`  컬럼 탐지: ${detected || '(탐지 실패 — 헤더 확인 필요)'}`);
           console.log('');
-          ws.write(OUTPUT_HEADERS.map(escapeCSV).join(',') + '\n');
+          ws.write(OUTPUT_HEADERS.map(csvEscape).join(',') + '\n');
           initialized = true;
         }
 
@@ -384,7 +394,7 @@ async function main() {
           'agoda-hoteldata',
         ];
 
-        ws.write(row.map(escapeCSV).join(',') + '\n');
+        ws.write(row.map(csvEscape).join(',') + '\n');
         totalWritten++;
 
         if (samples.length < 10) {
@@ -474,4 +484,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { slugify, buildPartnerUrl, detectColMap };
+module.exports = { slugify, buildPartnerUrl, detectColMap, sanitizeText, csvEscape };
