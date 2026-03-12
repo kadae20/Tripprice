@@ -17,6 +17,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { parse: csvParseSync } = require('csv-parse/sync');
 
 // ──────────────────────────────────────────────
 // 경로 설정
@@ -126,63 +127,21 @@ function calculateCoverageScoreV2(h) {
 }
 
 // ──────────────────────────────────────────────
-// CSV 파서 (외부 패키지 없이 구현)
-// RFC 4180 기본 지원: 따옴표 필드, 내부 쉼표 처리
+// CSV 파싱 (csv-parse/sync — RFC 4180 완전 지원)
+// 따옴표 내부 개행·쉼표 포함 필드를 레코드 단위로 정확히 파싱.
+// 이전 parseCSV(줄 split 기반)는 멀티라인 필드를 찢는 버그가 있어 제거.
 // ──────────────────────────────────────────────
-function parseCSV(content) {
-  const lines = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
-  const rows = [];
-
-  for (const line of lines) {
-    if (line.trim() === '') continue;
-    const fields = [];
-    let current = '';
-    let inQuotes = false;
-
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i];
-      const next = line[i + 1];
-
-      if (inQuotes) {
-        if (ch === '"' && next === '"') {
-          current += '"';
-          i++; // 이스케이프된 따옴표 건너뜀
-        } else if (ch === '"') {
-          inQuotes = false;
-        } else {
-          current += ch;
-        }
-      } else {
-        if (ch === '"') {
-          inQuotes = true;
-        } else if (ch === ',') {
-          fields.push(current.trim());
-          current = '';
-        } else {
-          current += ch;
-        }
-      }
-    }
-    fields.push(current.trim());
-    rows.push(fields);
-  }
-
-  if (rows.length < 2) return [];
-
-  const headers = rows[0].map((h) => h.toLowerCase().replace(/\s+/g, '_'));
-  const records = [];
-
-  for (let i = 1; i < rows.length; i++) {
-    const row = rows[i];
-    if (row.every((cell) => cell === '')) continue; // 빈 줄 건너뜀
-    const record = {};
-    headers.forEach((header, idx) => {
-      record[header] = row[idx] !== undefined ? row[idx] : '';
-    });
-    records.push(record);
-  }
-
-  return records;
+function parseCsvFile(content) {
+  // NUL 제거 (일부 Agoda 파일에 포함)
+  const sanitized = content.replace(/\u0000/g, '');
+  return csvParseSync(sanitized, {
+    bom:                true,
+    columns:            true,
+    relax_quotes:       true,
+    relax_column_count: true,
+    skip_empty_lines:   true,
+    cast:               false,
+  });
 }
 
 // ──────────────────────────────────────────────
@@ -551,13 +510,13 @@ function generateReport(results, sourceFiles) {
     for (const r of failedResults) {
       const id   = r.hotel_id   || '(id 없음)';
       const name = r.hotel_name || r.raw_name || '(이름 없음)';
+      md += `### **${id}**\n`;
       if (r.missing_fields && r.missing_fields.length > 0) {
-        md += `- **${id}**: ${name} — missing: ${r.missing_fields.join(',')}\n`;
+        md += `${name} — missing: ${r.missing_fields.join(',')}\n\n`;
       } else {
-        md += `- **${id}**: ${name} — error: ${r.error_message || (r.errors || []).join(', ')}\n`;
+        md += `${name} — error: ${r.error_message || (r.errors || []).join(', ')}\n\n`;
       }
     }
-    md += '\n';
     if (failed > showCount) {
       md += `> ... 외 ${failed - showCount}건 생략 (상위 ${MAX_FAIL_LOG}건만 기록)\n\n`;
       md += `> **TIP**: 대량 실패 시 \`hoteldata-to-tripprice.js\`로 사전 변환 후 재실행하세요.\n\n`;
@@ -605,13 +564,14 @@ function processFile(filePath) {
       const parsed = JSON.parse(content);
       rawRecords = Array.isArray(parsed) ? parsed : [parsed];
     } else if (ext === '.csv') {
-      rawRecords = parseCSV(content);
+      rawRecords = parseCsvFile(content);
     } else {
       throw new Error(`지원하지 않는 파일 형식: ${ext}`);
     }
   } catch (err) {
+    // 파싱 에러(파일 읽기/CSV 파서 error) → 무조건 exit 1
     console.error(`  [오류] 파일 파싱 실패: ${filePath}\n  → ${err.message}`);
-    return [];
+    process.exit(1);
   }
 
   console.log(`  읽기 완료: ${rawRecords.length}개 레코드`);
