@@ -137,15 +137,21 @@ test('필수 필드 누락: exit code 1 (실패율 100% ≥ 1%)', () => {
   assert(!resB.ok, '기대 exit 1인데 exit 0');
 });
 
-test('필수 필드 누락: 리포트에 ### **fail-test-hotel** 형식 포함', () => {
+test('필수 필드 누락: 리포트에 "### **fail-test-hotel** {name}" 형식 포함', () => {
   assert(fs.existsSync(reportPath), `리포트 파일 없음: ${reportPath}`);
   const md = fs.readFileSync(reportPath, 'utf8');
   assert(md.includes('실패 호텔 목록'), '실패 호텔 목록 섹션 없음');
   const section = md.split('## 실패 호텔 목록')[1] || '';
-  // 형식: ### **fail-test-hotel**
+  // 형식: ### **fail-test-hotel** Fail Test Hotel
   assert(
     section.includes('### **fail-test-hotel**'),
     `"### **fail-test-hotel**" 형식 없음.\n섹션:\n${section.slice(0, 500)}`
+  );
+  // hotel_name도 같은 줄에 있어야 함
+  const headingLine = section.split('\n').find(l => l.includes('### **fail-test-hotel**')) || '';
+  assert(
+    headingLine.includes('Fail Test Hotel'),
+    `hotel_name이 헤딩 줄에 없음: "${headingLine}"`
   );
 });
 

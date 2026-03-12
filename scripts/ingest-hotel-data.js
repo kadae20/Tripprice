@@ -140,6 +140,7 @@ function parseCsvFile(content) {
     relax_quotes:       true,
     relax_column_count: true,
     skip_empty_lines:   true,
+    trim:               true,
     cast:               false,
   });
 }
@@ -510,11 +511,10 @@ function generateReport(results, sourceFiles) {
     for (const r of failedResults) {
       const id   = r.hotel_id   || '(id 없음)';
       const name = r.hotel_name || r.raw_name || '(이름 없음)';
-      md += `### **${id}**\n`;
       if (r.missing_fields && r.missing_fields.length > 0) {
-        md += `${name} — missing: ${r.missing_fields.join(',')}\n\n`;
+        md += `### **${id}** ${name}\n- missing: ${r.missing_fields.join(',')}\n\n`;
       } else {
-        md += `${name} — error: ${r.error_message || (r.errors || []).join(', ')}\n\n`;
+        md += `### **${id}** ${name}\n- error: ${r.error_message || (r.errors || []).join(', ')}\n\n`;
       }
     }
     if (failed > showCount) {
