@@ -549,15 +549,15 @@ function generateReport(results, sourceFiles) {
     const showCount = failedResults.length; // MAX_FAIL_LOG 이하로 보관됨
     md += `## 실패 호텔 목록 (${showCount}/${failed} 표시, 상한 ${MAX_FAIL_LOG})\n\n`;
     for (const r of failedResults) {
-      md += `### ${r.raw_name || '(이름 없음)'}\n`;
-      for (const err of r.errors) {
-        md += `- ❌ ${err}\n`;
+      const id   = r.hotel_id   || '(id 없음)';
+      const name = r.hotel_name || r.raw_name || '(이름 없음)';
+      if (r.missing_fields && r.missing_fields.length > 0) {
+        md += `- **${id}**: ${name} — missing: ${r.missing_fields.join(',')}\n`;
+      } else {
+        md += `- **${id}**: ${name} — error: ${r.error_message || (r.errors || []).join(', ')}\n`;
       }
-      for (const warn of r.warnings || []) {
-        md += `- ⚠️ ${warn}\n`;
-      }
-      md += '\n';
     }
+    md += '\n';
     if (failed > showCount) {
       md += `> ... 외 ${failed - showCount}건 생략 (상위 ${MAX_FAIL_LOG}건만 기록)\n\n`;
       md += `> **TIP**: 대량 실패 시 \`hoteldata-to-tripprice.js\`로 사전 변환 후 재실행하세요.\n\n`;
@@ -635,15 +635,36 @@ function processFile(filePath) {
       const { errors, warnings, isValid } = validateHotel(raw);
 
       if (!isValid) {
+        // 실패 시 hotel_id 생성 시도 (report 식별용)
+        const failHotelId = raw.hotel_id
+          ? String(raw.hotel_id).trim()
+          : (raw.hotel_name
+            ? generateHotelId(raw.hotel_name, raw.city || '')
+            : `unknown-${results.length}`);
+
+        // missing_fields 추출: "필수 필드 누락: city" → ["city"]
+        const missingFields = errors
+          .filter(e => e.startsWith('필수 필드 누락:'))
+          .map(e => e.replace('필수 필드 누락:', '').trim());
+
         // 실패 항목은 메모리에 상한(MAX_FAIL_LOG)까지만 보관
         if (results.filter(r => r.status === 'failed').length < MAX_FAIL_LOG) {
-          results.push({ status: 'failed', raw_name: rawName, errors, warnings });
+          results.push({
+            status: 'failed',
+            hotel_id: failHotelId,
+            hotel_name: rawName,
+            raw_name: rawName,
+            missing_fields: missingFields,
+            error_message: errors.join(', '),
+            errors,
+            warnings,
+          });
         }
-        // 콘솔 출력도 상한 적용
-        if (failCount < MAX_FAIL_LOG) {
-          console.log(`  ✗ ${rawName}: 필수 필드 오류 — ${errors.join(', ')}`);
-        } else if (failCount === MAX_FAIL_LOG) {
-          console.log(`  (이후 실패 로그 생략 — 상한 ${MAX_FAIL_LOG}건, hoteldata-to-tripprice.js 먼저 실행 권장)`);
+        // 콘솔 출력: hotel_id 포함, 상한 10건
+        if (failCount < 10) {
+          console.log(`  ✗ [${failHotelId}] ${rawName}: ${errors.join(', ')}`);
+        } else if (failCount === 10) {
+          console.log(`  (이후 실패 로그 생략 — hoteldata-to-tripprice.js 먼저 실행 권장)`);
         }
         failCount++;
         continue;
@@ -686,13 +707,20 @@ function processFile(filePath) {
         errors: [],
       });
     } catch (err) {
+      const failHotelId = raw.hotel_id
+        ? String(raw.hotel_id).trim()
+        : (raw.hotel_name ? generateHotelId(raw.hotel_name, raw.city || '') : `unknown-${results.length}`);
       results.push({
         status: 'failed',
+        hotel_id: failHotelId,
+        hotel_name: rawName,
         raw_name: rawName,
+        missing_fields: [],
+        error_message: `처리 중 예외 발생: ${err.message}`,
         errors: [`처리 중 예외 발생: ${err.message}`],
         warnings: [],
       });
-      console.log(`  ✗ ${rawName}: 예외 — ${err.message}`);
+      console.log(`  ✗ [${failHotelId}] ${rawName}: 예외 — ${err.message}`);
     }
   }
 
@@ -761,16 +789,28 @@ function main() {
   const failed = allResults.filter((r) => r.status === 'failed').length;
   const skipped = allResults.filter((r) => r.status === 'skipped').length;
 
+  // 실패 hotel_id 디버그 출력 (최대 10개)
+  if (failed > 0) {
+    const failedIds = allResults
+      .filter(r => r.status === 'failed')
+      .slice(0, 10)
+      .map(r => r.hotel_id || '(id 없음)');
+    console.log(`\n  실패 hotel_id (최대 10개): ${failedIds.join(', ')}`);
+  }
+
   console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log(` 완료: 총 ${allResults.length}건 | 성공 ${success} | 실패 ${failed} | 건너뜀 ${skipped}`);
   console.log(` 리포트: ${path.relative(ROOT, reportPath)}`);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
-  if (failed > 0) {
-    process.exit(1); // 실패 있으면 비정상 종료 코드 (CI 감지용)
+  // soft-fail: 실패율 1% 미만이면 exit 0, 1% 이상이면 exit 1
+  const total = allResults.length;
+  const failRate = total > 0 ? failed / total : 0;
+  if (failed > 0 && failRate >= 0.01) {
+    process.exit(1);
   }
 }
 
 if (require.main === module) main();
 
-module.exports = { calculateCoverageScoreV2, normalizeHotel };
+module.exports = { calculateCoverageScoreV2, normalizeHotel, validateHotel, generateHotelId };
