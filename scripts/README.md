@@ -263,10 +263,43 @@ npm run publish:auto -- --dry-run
 선정 → pipeline → publish-auto 전체 자동화.
 
 ```bash
-node scripts/editorial-os.js --dry-run                          # 대상 선정만 출력
-node scripts/editorial-os.js --limit=3 --min-score=60           # 자동 선정 3개
-node scripts/editorial-os.js --hotels=ibis-myeongdong --publish # 직접 지정 + 발행
-npm run editorial:os -- --limit=5 --publish
+# 대상 선정만 출력 (파일 조작 없음)
+node scripts/editorial-os.js --dry-run
+
+# --auto: 오늘 drafts 있으면 pipeline 생략 → publish-auto만 실행
+node scripts/editorial-os.js --auto --dry-run
+
+# --auto + 날짜 필터 (EC2 배포 이후 파일만)
+node scripts/editorial-os.js --auto --since=2026-03-13 --dry-run
+
+# 자동 선정 3개, pipeline + QA까지 (발행은 별도)
+node scripts/editorial-os.js --limit=3 --min-score=60
+
+# 직접 지정 + 실제 발행 (WP 환경변수 필요)
+node scripts/editorial-os.js --hotels=ibis-myeongdong --publish
+
+npm run editorial:os -- --auto --dry-run
+```
+
+---
+
+## 검증 커맨드 (로컬 / EC2 공통)
+
+```bash
+# 1) 전체 흐름 dry-run — 파일 변경 없이 선정 + QA 결과만 출력
+node scripts/editorial-os.js --auto --dry-run
+
+# 2) 오늘 이후 drafts만 QA (자동 보강 포함, 발행 안 함)
+node scripts/publish-auto.js --since=$(date +%Y-%m-%d)
+
+# 3) 특정 draft 단일 QA
+node scripts/qa-wp-post.js wordpress/drafts/post-ibis-ambassador-seoul-myeongdong-review-2026-03-13.json
+
+# 4) 특정 draft 보강 dry-run (어떤 섹션이 추가되는지 미리 확인)
+node scripts/patch-draft-minimums.js wordpress/drafts/post-ibis-ambassador-seoul-myeongdong-review-2026-03-13.json --dry-run
+
+# 5) QA + 자동 보강 + queued 상태 확인 (WP 발행 없음)
+node scripts/publish-auto.js
 ```
 
 ---
