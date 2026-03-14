@@ -286,19 +286,23 @@ npm run editorial:os -- --auto --dry-run
 ## 검증 커맨드 (로컬 / EC2 공통)
 
 ```bash
-# 1) 전체 흐름 dry-run — 파일 변경 없이 선정 + QA 결과만 출력
-node scripts/editorial-os.js --auto --dry-run
+# 1) 단일 draft QA — content_markdown/html 실제 길이 확인 (0자이면 버그)
+node scripts/qa-wp-post.js wordpress/drafts/post-arang-stay-seoul-review-2026-03-13.json
+# 출력 예시: 텍스트 2135자(markdown) | H2 9 | 이미지 6개(featured 1+secs 5+html 0)
 
-# 2) 오늘 이후 drafts만 QA (자동 보강 포함, 발행 안 함)
-node scripts/publish-auto.js --since=$(date +%Y-%m-%d)
+# 2) publish-auto dry-run — 파일 이동/기록 없이 QA 결과만 출력
+node scripts/publish-auto.js --dry-run --since=2026-03-13
 
-# 3) 특정 draft 단일 QA
-node scripts/qa-wp-post.js wordpress/drafts/post-ibis-ambassador-seoul-myeongdong-review-2026-03-13.json
+# 3) publish-auto --no-move — QA + 자동 보강 실행, 파일 이동은 없음 (운영 안전 모드)
+node scripts/publish-auto.js --since=2026-03-13 --no-move
 
-# 4) 특정 draft 보강 dry-run (어떤 섹션이 추가되는지 미리 확인)
-node scripts/patch-draft-minimums.js wordpress/drafts/post-ibis-ambassador-seoul-myeongdong-review-2026-03-13.json --dry-run
+# 4) editorial-os --auto dry-run — 선정 대상 + 실행될 명령어만 출력
+node scripts/editorial-os.js --auto --dry-run --since=2026-03-13
 
-# 5) QA + 자동 보강 + queued 상태 확인 (WP 발행 없음)
+# 5) editorial-os --auto (오타 별칭도 동작)
+node scripts/editorial-os.js --auto --dryrun --since=2026-03-13
+
+# 6) 전체 QA + 자동 보강 + queued (WP 발행 없음, failed/ 기록 활성화)
 node scripts/publish-auto.js
 ```
 

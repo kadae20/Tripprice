@@ -15,8 +15,10 @@
  *   node scripts/publish-auto.js --publish                (QA 통과 시 WP 발행)
  *   node scripts/publish-auto.js --publish --match=ibis   (파일명 부분 일치 필터)
  *   node scripts/publish-auto.js --publish --since=2026-03-13  (날짜 이후 파일만)
+ *   node scripts/publish-auto.js --since=2026-03-13 --no-move  (QA+보강 실행, 이동 없음)
  *
- * --dry-run: 어떤 파일도 생성/수정/이동하지 않음. 콘솔 출력만.
+ * --dry-run: 어떤 파일도 생성/수정/이동하지 않음. 보강도 스킵. 콘솔 출력만.
+ * --no-move: QA + 자동 보강 실행하되 파일 이동(failed/published) 비활성화. 운영 안전 모드.
  * --publish: QA 통과 시 wp-publish.js 실행. 없으면 "queued" 상태로만 출력.
  * 환경변수: WP_URL, WP_USER, WP_APP_PASS (없으면 draft only)
  */
@@ -132,15 +134,17 @@ function saveQAResult(qaResult, destDir) {
 function main() {
   const args    = parseArgs();
   const dryRun  = !!args['dry-run'];
+  const noMove  = !!args['no-move'];   // QA + 보강 실행, 파일 이동만 비활성화
   const publish = !!args['publish'];
   const wpOk    = hasWpEnv();
 
   console.log('\n══════════════════════════════════════════════');
   console.log('  publish-auto — 자동 QA → 발행');
   console.log('══════════════════════════════════════════════');
-  if (dryRun)        console.log('  모드: DRY-RUN (파일 조작 없음, 콘솔 출력만)');
+  if (dryRun)        console.log('  모드: DRY-RUN (파일 조작 없음, 보강 스킵)');
+  else if (noMove)   console.log('  모드: NO-MOVE (QA+보강 실행, 파일 이동 없음)');
   else if (!publish) console.log('  모드: QA 전용 (발행하려면 --publish 추가)');
-  if (!dryRun && !wpOk) console.log('  ⚠  WP 환경변수 없음 → draft only (발행 스킵)');
+  if (!dryRun && !noMove && !wpOk) console.log('  ⚠  WP 환경변수 없음 → draft only (발행 스킵)');
   console.log('');
 
   const files = getDraftFiles(args);
@@ -183,8 +187,12 @@ function main() {
       const patchCount = getDraftPatchCount(draftFile);
       if (patchCount >= 2) {
         summary.qaFail++;
-        const savedQA = saveQAResult({ ...qa, patchLimitReached: true }, FAILED_DIR);
-        console.log(`  → 보강 한도 초과 (patch_count=${patchCount}) → ${path.relative(ROOT, savedQA)}`);
+        if (!noMove) {
+          const savedQA = saveQAResult({ ...qa, patchLimitReached: true }, FAILED_DIR);
+          console.log(`  → 보강 한도 초과 (patch_count=${patchCount}) → ${path.relative(ROOT, savedQA)}`);
+        } else {
+          console.log(`  → 보강 한도 초과 (patch_count=${patchCount}) [NO-MOVE: 기록 스킵]`);
+        }
         console.log('');
         continue;
       }
@@ -204,18 +212,26 @@ function main() {
           // 재시도 PASS → 아래 PASS 분기로 진행
           Object.assign(qa, qa2);
         } else {
-          // 재시도에서도 FAIL → failed/ 기록
+          // 재시도에서도 FAIL
           summary.qaFail++;
-          const savedQA = saveQAResult(qa2, FAILED_DIR);
-          console.log(`  → 보강 후에도 FAIL → ${path.relative(ROOT, savedQA)}`);
+          if (!noMove) {
+            const savedQA = saveQAResult(qa2, FAILED_DIR);
+            console.log(`  → 보강 후에도 FAIL → ${path.relative(ROOT, savedQA)}`);
+          } else {
+            console.log(`  → 보강 후에도 FAIL [NO-MOVE: failed/ 기록 스킵]`);
+          }
           console.log('');
           continue;
         }
       } else {
-        // 패치 자체가 실패(변경 없음 포함): 원래 QA 결과로 FAIL 처리
+        // 패치 자체가 실패(변경 없음 포함)
         summary.qaFail++;
-        const savedQA = saveQAResult(qa, FAILED_DIR);
-        console.log(`  → QA 실패 기록: ${path.relative(ROOT, savedQA)}`);
+        if (!noMove) {
+          const savedQA = saveQAResult(qa, FAILED_DIR);
+          console.log(`  → QA 실패 기록: ${path.relative(ROOT, savedQA)}`);
+        } else {
+          console.log(`  → QA 실패 (보강 없음) [NO-MOVE: failed/ 기록 스킵]`);
+        }
         console.log('');
         continue;
       }
@@ -223,9 +239,15 @@ function main() {
 
     summary.qaPass++;
 
-    // ── dry-run: 파일 조작 없이 종료 ─────────────────────────────────────
+    // ── dry-run / no-move: 이동 없이 종료 ──────────────────────────────────
     if (dryRun) {
       console.log(`  → DRY-RUN: QA 통과 (파일 조작 없음)`);
+      console.log('');
+      continue;
+    }
+    if (noMove) {
+      summary.queued++;
+      console.log(`  → QA 통과 [NO-MOVE: 이동 없음, queued]`);
       console.log('');
       continue;
     }
@@ -256,7 +278,6 @@ function main() {
       console.log(`  ✅ 발행 성공 → ${path.relative(ROOT, dest)}`);
     } else {
       summary.errors++;
-      // 발행 실패 시 QA 결과에 publish error도 기록
       const failResult = { ...qa, publishError: pub.stderr.slice(0, 500), publishedAt: new Date().toISOString() };
       const savedQA = saveQAResult(failResult, FAILED_DIR);
       console.log(`  ❌ 발행 실패 → ${path.relative(ROOT, savedQA)}`);
@@ -273,7 +294,9 @@ function main() {
     if (summary.patched > 0) {
       console.log(`    자동 보강: ${summary.patched}건 시도 | 보강 후 PASS: ${summary.repass}건`);
     }
-    if (publish) {
+    if (noMove) {
+      console.log(`    NO-MOVE: queued ${summary.queued}건 (파일 이동 없음)`);
+    } else if (publish) {
       console.log(`    발행 성공: ${summary.published} | WP 스킵: ${summary.skipped} | 발행 오류: ${summary.errors}`);
     } else {
       console.log(`    발행 준비됨(queued): ${summary.queued} (발행하려면 --publish 추가)`);

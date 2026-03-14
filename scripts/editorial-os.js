@@ -53,7 +53,7 @@ function parseArgs() {
     lang:     obj.lang     || 'ko',
     html:     !!obj.html,
     publish:  !!obj.publish,
-    dryRun:   !!obj['dry-run'],
+    dryRun:   !!(obj['dry-run'] || obj['dryrun']),  // --dry-run 또는 --dryrun 모두 허용
     auto:     !!obj.auto,
     since:    obj.since    || null,
     match:    obj.match    || null,
