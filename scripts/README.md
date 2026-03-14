@@ -236,6 +236,41 @@ node scripts/build-wp-post.js --draft=draft-seoul-luxury-comparison-2026-03-05 -
 
 ---
 
+### qa-wp-post.js
+`wordpress/drafts/post-*.json` 단일 파일 QA (title·slug·본문길이·이미지·featured 검증).
+
+```bash
+node scripts/qa-wp-post.js wordpress/drafts/post-ibis-myeongdong.json
+node scripts/qa-wp-post.js wordpress/drafts/post-ibis-myeongdong.json --json
+npm run qa -- wordpress/drafts/post-ibis-myeongdong.json
+```
+
+---
+
+### publish-auto.js
+`wordpress/drafts/` 전체 스캔 → QA → 조건부 WP 발행.
+
+```bash
+node scripts/publish-auto.js --dry-run          # QA만, 발행 없음
+node scripts/publish-auto.js --since=2026-03-13 # 날짜 이후 파일만
+node scripts/publish-auto.js --match=ibis       # 파일명 부분 일치
+npm run publish:auto -- --dry-run
+```
+
+---
+
+### editorial-os.js
+선정 → pipeline → publish-auto 전체 자동화.
+
+```bash
+node scripts/editorial-os.js --dry-run                          # 대상 선정만 출력
+node scripts/editorial-os.js --limit=3 --min-score=60           # 자동 선정 3개
+node scripts/editorial-os.js --hotels=ibis-myeongdong --publish # 직접 지정 + 발행
+npm run editorial:os -- --limit=5 --publish
+```
+
+---
+
 ## 공통 규칙
 
 - API 키는 환경변수로만 전달. 파일·로그 저장 금지.

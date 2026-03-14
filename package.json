@@ -27,6 +27,9 @@
     "cost:update":      "node scripts/_run-with-env.js scripts/aws-cost-fetch.js --update-env",
     "smoke:zai":        "node scripts/_run-with-env.js scripts/_smoke-zai.js",
     "smoke:wp":         "node scripts/_run-with-env.js scripts/_smoke-wp-post.js",
+    "qa":               "node scripts/qa-wp-post.js",
+    "publish:auto":     "node scripts/publish-auto.js",
+    "editorial:os":     "node scripts/editorial-os.js",
     "test":             "node scripts/test-wp-publish.js && node scripts/test-process-images.js && node scripts/test-build-wp-post.js && node scripts/test-fetch-download.js && node scripts/test-hoteldata-extract.js && node scripts/test-hoteldata-transform.js && node scripts/test-editorial-upgrade.js && node scripts/test-top5-list.js && node scripts/test-coverage-v2.js && node scripts/test-ingest-hotel-data.js"
   },
   "dependencies": {
