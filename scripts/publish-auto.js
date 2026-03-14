@@ -75,6 +75,18 @@ function getDraftFiles(args) {
   return files.map(f => path.join(DRAFTS_DIR, f));
 }
 
+// ── patch-draft-minimums.js 실행 (보강) ──────────────────────────────────────
+function runPatch(draftFile) {
+  const patchScript = path.join(__dirname, 'patch-draft-minimums.js');
+  const result = spawnSync(process.execPath, [patchScript, draftFile], {
+    encoding: 'utf8',
+    env: process.env,
+    cwd: ROOT,
+  });
+  if (result.stdout) process.stdout.write(result.stdout);
+  return result.status === 0;
+}
+
 // ── wp-publish.js 실행 ────────────────────────────────────────────────────────
 function runWpPublish(draftFile) {
   const publishScript = path.join(__dirname, 'wp-publish.js');
@@ -133,7 +145,7 @@ function main() {
 
   console.log(`  대상 파일: ${files.length}개\n`);
 
-  const summary = { total: files.length, qaPass: 0, qaFail: 0, queued: 0, published: 0, skipped: 0, errors: 0 };
+  const summary = { total: files.length, qaPass: 0, qaFail: 0, queued: 0, published: 0, skipped: 0, errors: 0, patched: 0, repass: 0 };
 
   for (const draftFile of files) {
     const rel = path.relative(ROOT, draftFile);
@@ -151,16 +163,44 @@ function main() {
     }
 
     if (!qa.pass) {
-      summary.qaFail++;
-      if (!dryRun) {
-        // dryRun=false 일 때만 파일시스템에 기록
+      if (dryRun) {
+        // dry-run: 보강 없이 FAIL 출력만
+        summary.qaFail++;
+        console.log(`  → DRY-RUN: QA 실패 (파일 기록 없음)`);
+        console.log('');
+        continue;
+      }
+
+      // ── 자동 보강 후 재시도 (1회) ────────────────────────────────────────
+      console.log(`  → 자동 보강 시도 (patch-draft-minimums)...`);
+      const patchOk = runPatch(draftFile);
+      if (patchOk) {
+        summary.patched++;
+        const qa2 = runQA(rel);
+        console.log(`  재QA: ${qa2.pass ? '✅ PASS' : '❌ FAIL'}  SEO ${qa2.seoScore}/100`);
+        if (qa2.errors.length > 0) qa2.errors.forEach(e => console.log(`     ✗ ${e}`));
+        if (qa2.warnings.length > 0) qa2.warnings.forEach(w => console.log(`     ⚠ ${w}`));
+
+        if (qa2.pass) {
+          summary.repass++;
+          // 재시도 PASS → 아래 PASS 분기로 진행
+          Object.assign(qa, qa2);
+        } else {
+          // 재시도에서도 FAIL → failed/ 기록
+          summary.qaFail++;
+          const savedQA = saveQAResult(qa2, FAILED_DIR);
+          console.log(`  → 보강 후에도 FAIL → ${path.relative(ROOT, savedQA)}`);
+          console.log('');
+          continue;
+        }
+      } else {
+        // 패치 자체가 실패(변경 없음 포함): 원래 QA 결과로 FAIL 처리
+        summary.qaFail++;
         const savedQA = saveQAResult(qa, FAILED_DIR);
         console.log(`  → QA 실패 기록: ${path.relative(ROOT, savedQA)}`);
-      } else {
-        console.log(`  → DRY-RUN: QA 실패 (파일 기록 없음)`);
+        console.log('');
+        continue;
       }
-      console.log('');
-      continue;
     }
 
     summary.qaPass++;
@@ -212,6 +252,9 @@ function main() {
   console.log(`  완료: 총 ${summary.total}개`);
   console.log(`    QA 통과: ${summary.qaPass} | QA 실패: ${summary.qaFail}`);
   if (!dryRun) {
+    if (summary.patched > 0) {
+      console.log(`    자동 보강: ${summary.patched}건 시도 | 보강 후 PASS: ${summary.repass}건`);
+    }
     if (publish) {
       console.log(`    발행 성공: ${summary.published} | WP 스킵: ${summary.skipped} | 발행 오류: ${summary.errors}`);
     } else {
