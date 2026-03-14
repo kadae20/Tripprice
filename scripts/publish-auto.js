@@ -75,6 +75,14 @@ function getDraftFiles(args) {
   return files.map(f => path.join(DRAFTS_DIR, f));
 }
 
+// ── draft의 patch_count 읽기 ─────────────────────────────────────────────────
+function getDraftPatchCount(draftFile) {
+  try {
+    const draft = JSON.parse(fs.readFileSync(draftFile, 'utf8'));
+    return (draft.workflow_state && draft.workflow_state.patch_count) || 0;
+  } catch { return 0; }
+}
+
 // ── patch-draft-minimums.js 실행 (보강) ──────────────────────────────────────
 function runPatch(draftFile) {
   const patchScript = path.join(__dirname, 'patch-draft-minimums.js');
@@ -171,8 +179,18 @@ function main() {
         continue;
       }
 
+      // ── patch_count 한도 확인 (최대 2회) ──────────────────────────────────
+      const patchCount = getDraftPatchCount(draftFile);
+      if (patchCount >= 2) {
+        summary.qaFail++;
+        const savedQA = saveQAResult({ ...qa, patchLimitReached: true }, FAILED_DIR);
+        console.log(`  → 보강 한도 초과 (patch_count=${patchCount}) → ${path.relative(ROOT, savedQA)}`);
+        console.log('');
+        continue;
+      }
+
       // ── 자동 보강 후 재시도 (1회) ────────────────────────────────────────
-      console.log(`  → 자동 보강 시도 (patch-draft-minimums)...`);
+      console.log(`  → 자동 보강 시도 (patch-draft-minimums, patch_count=${patchCount})...`);
       const patchOk = runPatch(draftFile);
       if (patchOk) {
         summary.patched++;

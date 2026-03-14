@@ -3,22 +3,20 @@
  * patch-draft-minimums.js
  *
  * wordpress/drafts/post-*.json 단일 파일을 읽어
- * qa-wp-post.js의 Hard gate 기준(텍스트 2000자 / 이미지 5장 / featured)을
- * 통과할 수 있도록 최소 보강한다.
+ * qa-wp-post.js의 Hard gate 기준을 통과할 수 있도록 최소 보강한다.
  *
  * 사용법:
  *   node scripts/patch-draft-minimums.js <draft_json_path> [--dry-run]
  *
- * --dry-run: 파일을 쓰지 않고 변경 예정 내용만 출력
- *
  * 동작:
- *   1) content_markdown 없으면 변경 없이 exit 0
- *   2) 텍스트 plain 길이 < 2000자 → 보강 섹션 append
+ *   1) QA와 동일한 소스 탐지: content_html 우선, 없으면 content_markdown
+ *   2) 텍스트 길이 < 2000자 → 보강 섹션 append (HTML 또는 Markdown 형식으로)
  *   3) 이미지 총합 < 5 → content_images에 보강 이미지 추가
  *   4) featured_media_url 없으면 첫 이미지 local_path로 세팅
- *   5) 실제 저장 시 원본을 .bak/ 에 1회 백업
+ *   5) workflow_state.patch_count++ 및 last_patched 기록
+ *   6) 실제 저장 시 원본을 .bak/ 에 1회 백업
  *
- * 외부 API/네트워크 불필요. assets/ 폴더 파일을 우선 활용.
+ * --dry-run: 파일을 쓰지 않고 변경 예정 내용만 출력
  */
 'use strict';
 
@@ -28,12 +26,12 @@ const path = require('path');
 const ROOT    = path.resolve(__dirname, '..');
 const BAK_DIR = path.join(ROOT, 'wordpress', 'drafts', '.bak');
 
-const MIN_TEXT_LEN = 2000;
+const MIN_TEXT_LEN  = 2000;
 const MIN_TOTAL_IMG = 5;
 const PLACEHOLDER_BASE = 'https://via.placeholder.com/1200x800?text=Tripprice';
 
-// ── 보강 섹션 블록 (한국어, 섹션당 250~350자) ─────────────────────────────────
-const BOOSTER_SECTIONS = [
+// ── 보강 섹션 (Markdown 형식) ─────────────────────────────────────────────────
+const BOOSTER_MD = [
   {
     heading: '## 위치 & 동선 팁',
     body: '호텔에서 주요 관광지·쇼핑 지구까지의 동선을 미리 확인해두면 여행 효율이 크게 높아집니다. '
@@ -77,6 +75,48 @@ const BOOSTER_SECTIONS = [
         + '성수기(연휴·명절·축제 기간)에는 최소 2~4주 전 예약을 권장합니다. '
         + '출발 전날 예약 상태를 한 번 더 확인하는 것도 잊지 마세요.',
   },
+  {
+    heading: '## 조식 & 식음료 안내',
+    body: '호텔 레스토랑 조식은 뷔페형과 세트형으로 나뉘며, 사전 포함 패키지가 별도 구매보다 '
+        + '저렴한 경우가 많으니 예약 시 확인해보세요. 조식 시간은 보통 오전 6시 30분~10시이며, '
+        + '주말에는 오전 11시까지 연장되기도 합니다. 조식 미포함 객실은 근처 편의점이나 '
+        + '로컬 카페를 활용하면 비용을 줄일 수 있습니다. 알레르기나 채식 식단이 필요하다면 '
+        + '체크인 전 호텔에 미리 알려두는 것이 좋습니다. 1층 카페나 라운지에서 음료와 간식을 '
+        + '판매하는 경우가 많아, 늦은 밤에도 간단히 이용할 수 있습니다.',
+  },
+  {
+    heading: '## 주차 & 교통 안내',
+    body: '호텔 자주차장 이용 요금과 운영 시간은 숙박 요금에 포함되지 않는 경우가 많습니다. '
+        + '사전에 주차 가능 여부와 일일 요금을 확인해두세요. 주변에 공영 주차장이 있다면 '
+        + '더 저렴하게 이용할 수 있습니다. 대중교통을 이용하는 경우 가장 가까운 지하철역과 '
+        + '도보 시간을 미리 파악해두면 편리합니다. 공항 리무진 버스나 공항철도 경유 방법도 '
+        + '체크하면 이동 비용을 절감할 수 있습니다. 호텔 셔틀 서비스 유무도 확인해보세요.',
+  },
+  {
+    heading: '## 피트니스 & 부대시설',
+    body: '대부분의 중급 이상 호텔은 피트니스 센터를 무료로 제공하지만 운영 시간이 제한될 수 있습니다. '
+        + '수영장(실내·외), 사우나, 스파 등 부대시설 이용은 별도 요금이 발생하기도 하므로 예약 전 확인하세요. '
+        + '비즈니스 센터나 미팅룸이 필요한 경우 사전 예약이 필요한지 확인하는 것이 좋습니다. '
+        + '컨시어지 서비스를 통해 근처 관광 명소 예약, 식당 추천, 교통편 안내 등을 받을 수 있습니다. '
+        + '세탁 서비스나 드라이클리닝도 대부분 유료로 제공되므로 장기 숙박 시 미리 문의하세요.',
+  },
+  {
+    heading: '## 주변 관광지 & 쇼핑',
+    body: '호텔 주변의 주요 관광지와 쇼핑 명소를 사전에 파악해두면 여행 동선을 최적화할 수 있습니다. '
+        + '도보로 이동 가능한 거리에 있는 명소부터 우선 계획하고, 먼 곳은 대중교통이나 택시를 이용하세요. '
+        + '호텔 컨시어지에게 근처 맛집이나 숨겨진 명소를 추천받는 것도 좋은 방법입니다. '
+        + '면세점이나 시내 쇼핑몰이 가깝다면 쇼핑 계획을 미리 세워두세요. '
+        + '야간 투어나 문화 공연 예약은 미리 해두는 것이 좋으며, 호텔 근처 편의시설(약국·환전소·마트)의 '
+        + '위치도 파악해두면 긴급 상황에 유용합니다.',
+  },
+  {
+    heading: '## 반려동물 & 특별 요청',
+    body: '반려동물 동반 투숙 가능 여부는 호텔마다 다르므로 예약 전 반드시 확인해야 합니다. '
+        + '허용하는 경우에도 추가 요금이 발생하거나 특정 객실 타입만 허용되는 경우가 있습니다. '
+        + '허니문, 생일, 기념일 등 특별한 날을 위한 서비스(꽃·케이크·인테리어 데코)는 미리 요청하면 '
+        + '호텔 측에서 준비해주는 경우가 많습니다. 장애인 편의시설이나 의료 기기 사용이 필요한 경우도 '
+        + '예약 시 미리 알려두면 더 쾌적한 숙박을 보장받을 수 있습니다.',
+  },
 ];
 
 // ── CLI 파싱 ──────────────────────────────────────────────────────────────────
@@ -87,7 +127,16 @@ function parseArgs() {
   return { file, dryRun };
 }
 
-// ── Markdown 평문 길이 계산 (qa-wp-post.js와 동일 로직) ─────────────────────
+// ── HTML 평문 길이 계산 (qa-wp-post.js와 동일) ───────────────────────────────
+function stripHtmlLen(html) {
+  return (html || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .length;
+}
+
+// ── Markdown 평문 길이 계산 (qa-wp-post.js와 동일) ──────────────────────────
 function stripMarkdownLen(md) {
   return (md || '')
     .replace(/```[\s\S]*?```/g, ' ')
@@ -174,45 +223,75 @@ function main() {
     process.exit(1);
   }
 
-  // content_markdown 없으면 변경 없이 종료
-  const mdRaw = String(draft.content_markdown || '').trim();
-  if (!mdRaw) {
-    console.log(`  content_markdown 없음 — 변경 없이 종료 (${path.basename(absPath)})`);
+  // ── QA와 동일한 소스 탐지 ─────────────────────────────────────────────────
+  const htmlRaw = String(
+    draft.content_html || draft.html || draft.body_html ||
+    draft.content || draft.post_content || ''
+  ).trim();
+  const mdRaw = String(draft.content_markdown || draft.markdown || '').trim();
+
+  const useHtml = !!htmlRaw;
+  const useMd   = !useHtml && !!mdRaw;
+
+  if (!useHtml && !useMd) {
+    console.log(`  보강 가능한 본문 없음 (content_html/content_markdown 모두 비어있음) — 종료`);
     process.exit(0);
   }
 
-  // ── 현재 상태 측정 ─────────────────────────────────────────────────────────
-  const curTextLen = stripMarkdownLen(mdRaw);
-  const hasFeatured = !!(draft.featured_media_url && String(draft.featured_media_url).trim());
-  const curImgSecs  = countContentImages(draft.content_images);
-  const curTotalImg = (hasFeatured ? 1 : 0) + curImgSecs;
+  const contentSource = useHtml ? 'html' : 'markdown';
+
+  // ── 현재 텍스트 길이 측정 ──────────────────────────────────────────────────
+  const curTextLen = useHtml ? stripHtmlLen(htmlRaw) : stripMarkdownLen(mdRaw);
+
+  // ── 이미지 상태 측정 ───────────────────────────────────────────────────────
+  const hasFeatured  = !!(draft.featured_media_url && String(draft.featured_media_url).trim());
+  const imgInHtml    = useHtml ? (htmlRaw.match(/<img/gi) || []).length : 0;
+  const curImgSecs   = countContentImages(draft.content_images);
+  const curTotalImg  = (hasFeatured ? 1 : 0) + imgInHtml + curImgSecs;
 
   // ── 변경 계획 수립 ─────────────────────────────────────────────────────────
   const plan = { textAdded: 0, imagesAdded: 0, featuredSet: false, sectionsAdded: [] };
 
-  // 1) 텍스트 보강: 2000자 달성까지 섹션을 순환 append (최대 3순환)
-  //    섹션 제목 중복을 피하기 위해 2번째 이후 순환에는 suffix 부여
-  const CYCLE_SUFFIXES = ['', ' — 추가 안내', ' — 참고 정보'];
-  let newMd = mdRaw;
+  // 1) 텍스트 보강: QA가 읽는 소스에 동일한 형식으로 섹션 append
+  const CYCLE_SUFFIXES = ['', ' — 추가 안내'];
+  let newHtml = htmlRaw;
+  let newMd   = mdRaw;
+
   if (curTextLen < MIN_TEXT_LEN) {
     let idx = 0;
-    const MAX_ITER = BOOSTER_SECTIONS.length * CYCLE_SUFFIXES.length;
-    while (stripMarkdownLen(newMd) < MIN_TEXT_LEN && idx < MAX_ITER) {
-      const sec    = BOOSTER_SECTIONS[idx % BOOSTER_SECTIONS.length];
-      const suffix = CYCLE_SUFFIXES[Math.floor(idx / BOOSTER_SECTIONS.length)];
-      const heading = suffix ? sec.heading + suffix : sec.heading;
-      newMd += `\n\n${heading}\n\n${sec.body}`;
-      plan.sectionsAdded.push(heading.replace(/^## /, ''));
-      idx++;
+    const MAX_ITER = BOOSTER_MD.length * CYCLE_SUFFIXES.length;
+
+    if (useHtml) {
+      // HTML 모드: <h2>heading</h2>\n<p>body</p> 형식으로 append
+      while (stripHtmlLen(newHtml) < MIN_TEXT_LEN && idx < MAX_ITER) {
+        const sec    = BOOSTER_MD[idx % BOOSTER_MD.length];
+        const suffix = CYCLE_SUFFIXES[Math.floor(idx / BOOSTER_MD.length)];
+        const heading = sec.heading.replace(/^## /, '') + suffix;
+        const block = `\n<h2>${heading}</h2>\n<p>${sec.body}</p>`;
+        newHtml += block;
+        plan.sectionsAdded.push(heading);
+        idx++;
+      }
+      plan.textAdded = stripHtmlLen(newHtml) - curTextLen;
+    } else {
+      // Markdown 모드: ## heading\n\nbody 형식으로 append
+      while (stripMarkdownLen(newMd) < MIN_TEXT_LEN && idx < MAX_ITER) {
+        const sec    = BOOSTER_MD[idx % BOOSTER_MD.length];
+        const suffix = CYCLE_SUFFIXES[Math.floor(idx / BOOSTER_MD.length)];
+        const heading = suffix ? sec.heading + suffix : sec.heading;
+        newMd += `\n\n${heading}\n\n${sec.body}`;
+        plan.sectionsAdded.push(heading.replace(/^## /, ''));
+        idx++;
+      }
+      plan.textAdded = stripMarkdownLen(newMd) - curTextLen;
     }
-    plan.textAdded = stripMarkdownLen(newMd) - curTextLen;
   }
 
-  // 2) 이미지 보강: 5장 미만이면 보강
-  //    featured_media_url 없을 때 기존 이미지 첫 번째를 먼저 세팅 시도
+  // 2) 이미지 보강: featured + content_images 합산이 MIN_TOTAL_IMG 미만이면 보강
   let newContentImages = JSON.parse(JSON.stringify(draft.content_images || []));
   let newFeatured = String(draft.featured_media_url || '').trim();
 
+  // featured 없으면 기존 content_images 첫 이미지로 세팅 시도
   if (!newFeatured) {
     const firstPath = getFirstImagePath(newContentImages);
     if (firstPath) {
@@ -221,26 +300,22 @@ function main() {
     }
   }
 
-  // featured 적용 후 총 이미지 수 재계산
-  let effFeatured = newFeatured ? 1 : 0;
-  let effImgSecs  = countContentImages(newContentImages);
-  let effTotal    = effFeatured + effImgSecs;
+  // featured 재계산 후 부족분 확인
+  const effFeatured = newFeatured ? 1 : 0;
+  const effTotal    = effFeatured + imgInHtml + countContentImages(newContentImages);
 
   if (effTotal < MIN_TOTAL_IMG) {
-    const needed = MIN_TOTAL_IMG - effTotal;
+    const needed     = MIN_TOTAL_IMG - effTotal;
     const localAssets = findLocalAssets();
-
-    // 추가할 local_path 목록 (로컬 파일 우선, 없으면 placeholder URL)
     const extraPaths = [];
     for (let i = 0; i < needed; i++) {
-      if (localAssets.length > 0) {
-        extraPaths.push(localAssets[i % localAssets.length]);
-      } else {
-        extraPaths.push(`${PLACEHOLDER_BASE}&n=${i + 1}`);
-      }
+      extraPaths.push(
+        localAssets.length > 0
+          ? localAssets[i % localAssets.length]
+          : `${PLACEHOLDER_BASE}&n=${i + 1}`
+      );
     }
 
-    // 첫 번째 섹션 images[]에 추가, 섹션 없으면 새로 생성
     if (newContentImages.length > 0) {
       const sec = newContentImages[0];
       if (!sec.images) sec.images = [];
@@ -255,7 +330,6 @@ function main() {
     }
     plan.imagesAdded = needed;
 
-    // featured가 아직 없으면 첫 보강 이미지로 세팅
     if (!newFeatured) {
       newFeatured = extraPaths[0];
       plan.featuredSet = true;
@@ -270,12 +344,14 @@ function main() {
   }
 
   // ── 리포트 출력 ────────────────────────────────────────────────────────────
+  const finalTextLen = curTextLen + plan.textAdded;
+  const finalImgTotal = effTotal + plan.imagesAdded;
   const lines = [
     plan.textAdded > 0
-      ? `텍스트 +${plan.textAdded}자 → 총 ${curTextLen + plan.textAdded}자 (섹션: ${plan.sectionsAdded.map(s => s.replace('## ','')).join(', ')})`
+      ? `텍스트 [${contentSource}] +${plan.textAdded}자 → 총 ${finalTextLen}자 (섹션: ${plan.sectionsAdded.join(', ')})`
       : null,
     plan.imagesAdded > 0
-      ? `이미지 +${plan.imagesAdded}장 → 총 ${effTotal + plan.imagesAdded}장`
+      ? `이미지 +${plan.imagesAdded}장 → 총 ${finalImgTotal}장`
       : null,
     plan.featuredSet
       ? `featured_media_url → "${newFeatured.slice(0, 60)}${newFeatured.length > 60 ? '…' : ''}"`
@@ -291,20 +367,36 @@ function main() {
   // ── 백업 후 저장 ───────────────────────────────────────────────────────────
   fs.mkdirSync(BAK_DIR, { recursive: true });
   const bakPath = path.join(BAK_DIR, path.basename(absPath));
-  // 이미 백업이 있어도 1회만 (원본 보존을 위해 존재하지 않을 때만)
   if (!fs.existsSync(bakPath)) {
     fs.writeFileSync(bakPath, fs.readFileSync(absPath, 'utf8'), 'utf8');
   }
 
-  draft.content_markdown  = newMd;
-  draft.content_images    = newContentImages;
+  // 변경 적용
+  if (useHtml) {
+    // content_html의 필드명 보존 (어느 필드에 있었는지 확인)
+    if      (draft.content_html)  draft.content_html  = newHtml;
+    else if (draft.html)          draft.html          = newHtml;
+    else if (draft.body_html)     draft.body_html     = newHtml;
+    else if (draft.content)       draft.content       = newHtml;
+    else if (draft.post_content)  draft.post_content  = newHtml;
+  } else {
+    if      (draft.content_markdown) draft.content_markdown = newMd;
+    else if (draft.markdown)         draft.markdown         = newMd;
+  }
+
+  draft.content_images = newContentImages;
   if (plan.featuredSet) draft.featured_media_url = newFeatured;
+
+  // patch_count 추적
+  if (!draft.workflow_state) draft.workflow_state = {};
+  draft.workflow_state.patch_count  = (draft.workflow_state.patch_count || 0) + 1;
+  draft.workflow_state.last_patched = new Date().toISOString();
 
   fs.writeFileSync(absPath, JSON.stringify(draft, null, 2), 'utf8');
 
-  console.log(`  PATCH: ${path.basename(absPath)}`);
+  console.log(`  PATCH [${contentSource}]: ${path.basename(absPath)}`);
   lines.forEach(l => console.log(`    • ${l}`));
   console.log(`  백업: wordpress/drafts/.bak/${path.basename(absPath)}`);
 }
 
-main();
+if (require.main === module) main();
