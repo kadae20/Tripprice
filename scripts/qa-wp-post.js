@@ -56,10 +56,27 @@ function stripHtml(html) {
     .trim();
 }
 
+// ── Markdown에서 텍스트 추출 (외부 라이브러리 없이) ──────────────────────────
+function stripMarkdown(md) {
+  return (md || '')
+    .replace(/```[\s\S]*?```/g, ' ')        // 코드블록 제거
+    .replace(/`[^`]+`/g, ' ')               // 인라인 코드 제거
+    .replace(/!\[.*?\]\(.*?\)/g, ' ')       // 이미지 링크 제거
+    .replace(/\[([^\]]+)\]\(.*?\)/g, '$1')  // 링크 → 텍스트만
+    .replace(/^#{1,6}\s+/gm, ' ')           // 헤딩 기호 제거
+    .replace(/[*_~>|]/g, ' ')               // 강조/인용 기호 제거
+    .replace(/^\s*[-+*]\s+/gm, ' ')         // 목록 기호 제거
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // ── content_images 총 이미지 수 ───────────────────────────────────────────────
 function countContentImages(contentImages) {
   if (!Array.isArray(contentImages)) return 0;
-  return contentImages.reduce((sum, sec) => sum + ((sec.images || []).length), 0);
+  return contentImages.reduce((sum, sec) => {
+    const imgs = sec.images || sec.media || sec.gallery || [];
+    return sum + (Array.isArray(imgs) ? imgs.length : 0);
+  }, 0);
 }
 
 // ── SEO 점수 계산 (0~100) ─────────────────────────────────────────────────────
@@ -112,24 +129,47 @@ function runQA(draftFilePath) {
     };
   }
 
-  const title      = String(draft.post_title || draft.title || '');
-  const slug       = String(draft.slug || '');
-  const html       = String(draft.content_html || draft.content || '');
-  const plainText  = stripHtml(html);
-  const textLen    = plainText.length;
-  const imgInHtml  = (html.match(/<img/gi) || []).length;
-  const imgInSecs  = countContentImages(draft.content_images);
-  const totalImg   = imgInHtml + imgInSecs;
-  const h2         = (html.match(/<h2/gi) || []).length;
-  const h3         = (html.match(/<h3/gi) || []).length;
-  const hasFeatured = !!(draft.featured_media_url && String(draft.featured_media_url).trim());
+  const title = String(draft.post_title || draft.title || '');
+  const slug  = String(draft.slug || '');
+
+  // ── 본문 소스 탐지: HTML 우선, 없으면 markdown 폴백 ──────────────────────
+  const htmlRaw = String(
+    draft.content_html || draft.html || draft.body_html ||
+    draft.content || draft.post_content || ''
+  ).trim();
+  const mdRaw = String(draft.content_markdown || draft.markdown || '').trim();
+
+  let plainText, textLen, imgInHtml, h2, h3;
+  if (htmlRaw) {
+    plainText  = stripHtml(htmlRaw);
+    textLen    = plainText.length;
+    imgInHtml  = (htmlRaw.match(/<img/gi) || []).length;
+    h2         = (htmlRaw.match(/<h2/gi) || []).length;
+    h3         = (htmlRaw.match(/<h3/gi) || []).length;
+  } else if (mdRaw) {
+    plainText  = stripMarkdown(mdRaw);
+    textLen    = plainText.length;
+    imgInHtml  = 0; // markdown 이미지는 content_images로 집계
+    h2         = (mdRaw.match(/^##\s+/gm) || []).length;
+    h3         = (mdRaw.match(/^###\s+/gm) || []).length;
+  } else {
+    plainText = ''; textLen = 0; imgInHtml = 0; h2 = 0; h3 = 0;
+  }
+
+  // ── 이미지 집계: featured(1) + content_images + html inline ──────────────
+  const hasFeatured  = !!(draft.featured_media_url && String(draft.featured_media_url).trim());
+  const featuredCount = hasFeatured ? 1 : 0;
+  const imgInSecs    = countContentImages(draft.content_images);
+  const totalImg     = featuredCount + imgInHtml + imgInSecs;
 
   const stats = {
-    titleLen:  title.length,
-    slugLen:   slug.length,
+    titleLen:      title.length,
+    slugLen:       slug.length,
+    contentSource: htmlRaw ? 'html' : (mdRaw ? 'markdown' : 'none'),
     textLen,
     imgInHtml,
     imgInSecs,
+    featuredCount,
     totalImg,
     h2,
     h3,
@@ -143,7 +183,7 @@ function runQA(draftFilePath) {
   if (slug.length < 5)    errors.push(`slug 길이 부족: ${slug.length}자 (최소 5자)`);
   if (textLen < 2000)     errors.push(`본문 텍스트 부족: ${textLen}자 (최소 2000자)`);
   if (h2 < 4)             errors.push(`H2 개수 부족: ${h2}개 (최소 4개)`);
-  if (totalImg < 5)       errors.push(`이미지 부족: html ${imgInHtml}개 + content_images ${imgInSecs}개 = ${totalImg}개 (최소 5개)`);
+  if (totalImg < 5)       errors.push(`이미지 부족: featured ${featuredCount} + html ${imgInHtml} + content_images ${imgInSecs} = ${totalImg}개 (최소 5개)`);
   if (!hasFeatured)       errors.push(`featured_media_url 없음`);
 
   // ── Soft warnings ───────────────────────────────────────────────────────────
@@ -180,7 +220,7 @@ function main() {
     const icon = result.pass ? '✅ PASS' : '❌ FAIL';
     console.log(`\n${icon}  ${path.basename(draftFile)}`);
     console.log(`  SEO 점수: ${result.seoScore}/100`);
-    console.log(`  통계: 텍스트 ${result.stats.textLen}자 | H2 ${result.stats.h2} | H3 ${result.stats.h3} | 이미지 ${result.stats.totalImg}개 | coverage ${result.stats.coverageScore}점`);
+    console.log(`  통계: 텍스트 ${result.stats.textLen}자(${result.stats.contentSource}) | H2 ${result.stats.h2} | H3 ${result.stats.h3} | 이미지 ${result.stats.totalImg}개(featured ${result.stats.featuredCount}+secs ${result.stats.imgInSecs}+html ${result.stats.imgInHtml}) | coverage ${result.stats.coverageScore}점`);
     if (result.errors.length > 0) {
       console.log(`\n  [Hard Fail]`);
       result.errors.forEach(e => console.log(`    ✗ ${e}`));
