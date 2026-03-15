@@ -57,7 +57,7 @@ function getDraftFiles(args) {
   if (!fs.existsSync(DRAFTS_DIR)) return [];
 
   let files = fs.readdirSync(DRAFTS_DIR)
-    .filter(f => f.startsWith('post-') && f.endsWith('.json'))
+    .filter(f => f.startsWith('post-') && f.endsWith('.json') && !f.endsWith('.qa.json'))
     .sort();
 
   // --match: 파일명 부분 일치

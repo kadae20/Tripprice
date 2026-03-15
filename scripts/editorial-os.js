@@ -82,7 +82,7 @@ function selectFromDrafts(sinceDate) {
   if (!fs.existsSync(DRAFTS_DIR)) return [];
   const since = sinceDate ? new Date(sinceDate).getTime() : Date.now() - 86400000; // 기본: 24h
   return fs.readdirSync(DRAFTS_DIR)
-    .filter(f => f.startsWith('post-') && f.endsWith('.json'))
+    .filter(f => f.startsWith('post-') && f.endsWith('.json') && !f.endsWith('.qa.json'))
     .filter(f => {
       try { return fs.statSync(path.join(DRAFTS_DIR, f)).mtimeMs >= since; } catch { return false; }
     })
@@ -180,7 +180,10 @@ function main() {
   // ── 1) 발행 불가 목록 ───────────────────────────────────────────────────────
   const blocked = getBlockedHotelIds();
   if (blocked.size > 0) {
-    console.log(`  발행 불가 제외 목록 (${blocked.size}개): ${[...blocked].join(', ')}`);
+    const preview = [...blocked].slice(0, 20).join(', ');
+    const ellipsis = blocked.size > 20 ? ` … (총 ${blocked.size}개)` : '';
+    console.log(`  발행 불가 제외 목록: 총 ${blocked.size}개`);
+    console.log(`  예시(최대 20개): ${preview}${ellipsis}`);
   }
 
   // ── 2) 호텔 선정 ───────────────────────────────────────────────────────────
@@ -260,6 +263,7 @@ function main() {
     selectionMode,
     hotels: hotels.map(h => ({ id: h.id, score: h.score, name: h.name })),
     args: { lang: args.lang, html: args.html, publish: args.publish, auto: args.auto, since: args.since, match: args.match },
+    blockedList: [...blocked],   // 전체 목록은 로그에만 기록
     pipelineSkipped: skipPipeline,
     pipelineOk: null,
     publishAutoRan: false,
@@ -310,9 +314,14 @@ function main() {
   console.log(`  node scripts/publish-auto.js ${publishArgs.join(' ')}`);
   console.log(`──────────────────────────────────────────────\n`);
 
-  runScript('publish-auto.js', publishArgs);
-  logData.publishAutoRan = true;
-
+  try {
+    const ok = runScript('publish-auto.js', publishArgs);
+    logData.publishAutoRan = true;
+    if (!ok) logData.error = 'publish-auto exited non-zero';
+  } catch (e) {
+    logData.error = `publish-auto exception: ${e.message}`;
+    console.error(`\n  ❌ publish-auto 예외: ${e.message}\n`);
+  }
   saveLog(logData);
 
   console.log('\n══════════════════════════════════════════════');
