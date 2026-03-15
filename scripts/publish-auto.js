@@ -33,6 +33,7 @@ const ROOT         = path.resolve(__dirname, '..');
 const DRAFTS_DIR   = path.join(ROOT, 'wordpress', 'drafts');
 const PUBLISHED_DIR = path.join(ROOT, 'wordpress', 'published');
 const FAILED_DIR   = path.join(ROOT, 'wordpress', 'failed');
+const LOGS_DIR     = path.join(ROOT, 'logs');
 
 // ── CLI 파싱 ──────────────────────────────────────────────────────────────────
 function parseArgs() {
@@ -130,13 +131,33 @@ function saveQAResult(qaResult, destDir) {
   return dest;
 }
 
+// ── 발행 로그 저장 (logs/publish-auto-YYYY-MM-DD.json) ────────────────────────
+function savePublishLog(records) {
+  if (!records.length) return;
+  try {
+    fs.mkdirSync(LOGS_DIR, { recursive: true });
+    const date = new Date().toISOString().split('T')[0];
+    const logPath = path.join(LOGS_DIR, `publish-auto-${date}.json`);
+    let existing = [];
+    if (fs.existsSync(logPath)) {
+      try { existing = JSON.parse(fs.readFileSync(logPath, 'utf8')); } catch { existing = []; }
+      if (!Array.isArray(existing)) existing = [existing];
+    }
+    existing.push(...records);
+    fs.writeFileSync(logPath, JSON.stringify(existing, null, 2), 'utf8');
+  } catch (e) {
+    console.error(`  ⚠  로그 저장 실패: ${e.message}`);
+  }
+}
+
 // ── 메인 ─────────────────────────────────────────────────────────────────────
 function main() {
-  const args    = parseArgs();
-  const dryRun  = !!args['dry-run'];
-  const noMove  = !!args['no-move'];   // QA + 보강 실행, 파일 이동만 비활성화
-  const publish = !!args['publish'];
-  const wpOk    = hasWpEnv();
+  const args       = parseArgs();
+  const dryRun     = !!args['dry-run'];
+  const noMove     = !!args['no-move'];   // QA + 보강 실행, 파일 이동만 비활성화
+  const publish    = !!args['publish'];
+  const wpOk       = hasWpEnv();
+  const maxPublish = parseInt(args['max-publish'] || '3', 10);
 
   console.log('\n══════════════════════════════════════════════');
   console.log('  publish-auto — 자동 QA → 발행');
@@ -157,10 +178,17 @@ function main() {
 
   console.log(`  대상 파일: ${files.length}개\n`);
 
-  const summary = { total: files.length, qaPass: 0, qaFail: 0, queued: 0, published: 0, skipped: 0, errors: 0, patched: 0, repass: 0, patchSkipped: 0 };
+  const summary = { total: files.length, qaPass: 0, qaFail: 0, queued: 0, published: 0, skipped: 0, errors: 0, patched: 0, repass: 0, patchSkipped: 0, limitReached: 0 };
+  const failReasons = {};  // QA 실패 원인 유형별 집계
+  const logRecords  = [];  // 발행 로그 (logs/publish-auto-DATE.json에 저장)
+  const trackReasons = (errors) => errors.forEach(e => {
+    const k = e.split(':')[0].trim();
+    failReasons[k] = (failReasons[k] || 0) + 1;
+  });
 
   for (const draftFile of files) {
     const rel = path.relative(ROOT, draftFile);
+    let wasPatched = false;
     console.log(`────────────────────────────────────────────`);
     console.log(`  📄 ${path.basename(draftFile)}`);
 
@@ -188,6 +216,10 @@ function main() {
       if (patchCount >= 2) {
         summary.patchSkipped++;
         summary.qaFail++;
+        trackReasons(qa.errors);
+        let lastPatched = null;
+        try { lastPatched = JSON.parse(fs.readFileSync(draftFile, 'utf8')).workflow_state?.last_patched || null; } catch { /* ignore */ }
+        logRecords.push({ draftFile: path.basename(draftFile), patchSkipped: true, patchCount, lastPatched, qaErrors: qa.errors.slice(0, 5), published: false, savedAt: new Date().toISOString() });
         if (!noMove) {
           const savedQA = saveQAResult({ ...qa, patchLimitReached: true }, FAILED_DIR);
           console.log(`  → 보강 한도 초과 (patch_count=${patchCount}) → ${path.relative(ROOT, savedQA)}`);
@@ -203,6 +235,7 @@ function main() {
       const patchOk = runPatch(draftFile);
       if (patchOk) {
         summary.patched++;
+        wasPatched = true;
         const qa2 = runQA(rel);
         console.log(`  재QA: ${qa2.pass ? '✅ PASS' : '❌ FAIL'}  SEO ${qa2.seoScore}/100`);
         if (qa2.errors.length > 0) qa2.errors.forEach(e => console.log(`     ✗ ${e}`));
@@ -215,6 +248,8 @@ function main() {
         } else {
           // 재시도에서도 FAIL
           summary.qaFail++;
+          trackReasons(qa2.errors);
+          logRecords.push({ draftFile: path.basename(draftFile), patched: true, qaErrors: qa2.errors.slice(0, 5), published: false, savedAt: new Date().toISOString() });
           if (!noMove) {
             const savedQA = saveQAResult(qa2, FAILED_DIR);
             console.log(`  → 보강 후에도 FAIL → ${path.relative(ROOT, savedQA)}`);
@@ -227,6 +262,8 @@ function main() {
       } else {
         // 패치 자체가 실패(변경 없음 포함)
         summary.qaFail++;
+        trackReasons(qa.errors);
+        logRecords.push({ draftFile: path.basename(draftFile), patched: false, patchFailed: true, qaErrors: qa.errors.slice(0, 5), published: false, savedAt: new Date().toISOString() });
         if (!noMove) {
           const savedQA = saveQAResult(qa, FAILED_DIR);
           console.log(`  → QA 실패 기록: ${path.relative(ROOT, savedQA)}`);
@@ -269,20 +306,31 @@ function main() {
       continue;
     }
 
+    // ── 일일 발행 한도 확인 ─────────────────────────────────────────────────
+    if (summary.published >= maxPublish) {
+      summary.queued++;
+      summary.limitReached++;
+      console.log(`  → 일일 발행 한도 도달 (max-publish=${maxPublish}) → queued`);
+      console.log('');
+      continue;
+    }
+
     // ── wp-publish 실행 ────────────────────────────────────────────────────
-    console.log(`  → wp-publish.js 실행 중...`);
+    console.log(`  → wp-publish.js 실행 중... (${summary.published + 1}/${maxPublish})`);
     const pub = runWpPublish(draftFile);
 
     if (pub.ok) {
       summary.published++;
       const dest = moveFile(draftFile, PUBLISHED_DIR);
       console.log(`  ✅ 발행 성공 → ${path.relative(ROOT, dest)}`);
+      logRecords.push({ draftFile: path.basename(draftFile), patched: wasPatched, seoScore: qa.seoScore, published: true, wpSummary: pub.stdout.slice(0, 200).trim() || null, savedAt: new Date().toISOString() });
     } else {
       summary.errors++;
       const failResult = { ...qa, publishError: pub.stderr.slice(0, 500), publishedAt: new Date().toISOString() };
       const savedQA = saveQAResult(failResult, FAILED_DIR);
       console.log(`  ❌ 발행 실패 → ${path.relative(ROOT, savedQA)}`);
       if (pub.stderr) console.log(`     ${pub.stderr.slice(0, 200)}`);
+      logRecords.push({ draftFile: path.basename(draftFile), patched: wasPatched, seoScore: qa.seoScore, published: false, wpError: pub.stderr.slice(0, 300).trim() || null, savedAt: new Date().toISOString() });
     }
     console.log('');
   }
@@ -295,15 +343,21 @@ function main() {
     if (summary.patched > 0 || summary.patchSkipped > 0) {
       console.log(`    자동 보강: ${summary.patched}건 시도 | 보강 후 PASS: ${summary.repass}건 | 한도초과 스킵: ${summary.patchSkipped}건`);
     }
+    if (summary.qaFail > 0 && Object.keys(failReasons).length > 0) {
+      const top3 = Object.entries(failReasons).sort((a, b) => b[1] - a[1]).slice(0, 3);
+      console.log(`    QA 실패 원인 TOP3: ${top3.map(([k, v]) => `${k}(${v}건)`).join(' | ')}`);
+    }
     if (noMove) {
       console.log(`    NO-MOVE: queued ${summary.queued}건 (파일 이동 없음)`);
     } else if (publish) {
       console.log(`    발행 성공: ${summary.published} | WP 스킵: ${summary.skipped} | 발행 오류: ${summary.errors}`);
+      if (summary.limitReached > 0) console.log(`    한도 초과 queued: ${summary.limitReached}건 (max-publish=${maxPublish})`);
     } else {
       console.log(`    발행 준비됨(queued): ${summary.queued} (발행하려면 --publish 추가)`);
     }
   }
   console.log('══════════════════════════════════════════════\n');
+  savePublishLog(logRecords);
 }
 
 if (require.main === module) main();

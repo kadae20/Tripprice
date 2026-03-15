@@ -55,8 +55,9 @@ function parseArgs() {
     publish:  !!obj.publish,
     dryRun:   !!(obj['dry-run'] || obj['dryrun']),  // --dry-run 또는 --dryrun 모두 허용
     auto:     !!obj.auto,
-    since:    obj.since    || null,
-    match:    obj.match    || null,
+    since:      obj.since      || null,
+    match:      obj.match      || null,
+    maxPublish: parseInt(obj['max-publish'] || '3', 10),
   };
 }
 
@@ -306,7 +307,7 @@ function main() {
   }
 
   const today = new Date().toISOString().split('T')[0];
-  const publishArgs = [`--since=${args.since || today}`, '--publish'];
+  const publishArgs = [`--since=${args.since || today}`, '--publish', `--max-publish=${args.maxPublish}`];
   if (args.match) publishArgs.push(`--match=${args.match}`);
 
   console.log(`\n──────────────────────────────────────────────`);
