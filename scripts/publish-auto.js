@@ -157,7 +157,7 @@ function main() {
 
   console.log(`  대상 파일: ${files.length}개\n`);
 
-  const summary = { total: files.length, qaPass: 0, qaFail: 0, queued: 0, published: 0, skipped: 0, errors: 0, patched: 0, repass: 0 };
+  const summary = { total: files.length, qaPass: 0, qaFail: 0, queued: 0, published: 0, skipped: 0, errors: 0, patched: 0, repass: 0, patchSkipped: 0 };
 
   for (const draftFile of files) {
     const rel = path.relative(ROOT, draftFile);
@@ -186,6 +186,7 @@ function main() {
       // ── patch_count 한도 확인 (최대 2회) ──────────────────────────────────
       const patchCount = getDraftPatchCount(draftFile);
       if (patchCount >= 2) {
+        summary.patchSkipped++;
         summary.qaFail++;
         if (!noMove) {
           const savedQA = saveQAResult({ ...qa, patchLimitReached: true }, FAILED_DIR);
@@ -291,8 +292,8 @@ function main() {
   console.log(`  완료: 총 ${summary.total}개`);
   console.log(`    QA 통과: ${summary.qaPass} | QA 실패: ${summary.qaFail}`);
   if (!dryRun) {
-    if (summary.patched > 0) {
-      console.log(`    자동 보강: ${summary.patched}건 시도 | 보강 후 PASS: ${summary.repass}건`);
+    if (summary.patched > 0 || summary.patchSkipped > 0) {
+      console.log(`    자동 보강: ${summary.patched}건 시도 | 보강 후 PASS: ${summary.repass}건 | 한도초과 스킵: ${summary.patchSkipped}건`);
     }
     if (noMove) {
       console.log(`    NO-MOVE: queued ${summary.queued}건 (파일 이동 없음)`);
