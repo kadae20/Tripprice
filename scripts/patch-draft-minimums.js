@@ -325,6 +325,81 @@ function main() {
     }
   }
 
+  // 3-pre) featured_media_url 자동 복구:
+  //   - 비어 있거나
+  //   - 로컬 assets/ 경로인데 파일이 존재하지 않는 경우
+  //   순서대로 대체 소스를 탐색 후 복구. 모두 실패하면 경고만 출력하고 계속.
+  {
+    const PLACEHOLDER_LOCAL = path.join(ROOT, 'assets', 'placeholder', 'featured.webp');
+    const fmu = String(draft.featured_media_url || '').trim();
+    const isRemoteUrl = /^https?:\/\//.test(fmu);
+    const isBroken = !fmu || (!isRemoteUrl && !fs.existsSync(path.resolve(ROOT, fmu)));
+
+    if (isBroken) {
+      let recovered = null;
+
+      // a) content_images에서 존재하는 로컬 파일 탐색
+      const ciImgs = draft.content_images || [];
+      outer: for (const sec of ciImgs) {
+        const imgs = sec.images || sec.media || sec.gallery || [];
+        for (const img of (Array.isArray(imgs) ? imgs : [])) {
+          const p = img.url || img.local_path || img.src || img.href || '';
+          if (!p) continue;
+          if (/^https?:\/\//.test(p) || fs.existsSync(path.resolve(ROOT, p))) {
+            recovered = p;
+            break outer;
+          }
+        }
+      }
+
+      // b) assets/placeholder/featured.webp
+      if (!recovered && fs.existsSync(PLACEHOLDER_LOCAL)) {
+        recovered = path.relative(ROOT, PLACEHOLDER_LOCAL).replace(/\\/g, '/');
+      }
+
+      // c) assets/processed/**/featured.webp — glob 탐색 후 첫 번째 파일을 placeholder로 복사
+      if (!recovered) {
+        const PROCESSED_DIR = path.join(ROOT, 'assets', 'processed');
+        if (fs.existsSync(PROCESSED_DIR)) {
+          const scanForFeatured = (dir) => {
+            let result = null;
+            try {
+              for (const entry of fs.readdirSync(dir)) {
+                if (result) break;
+                const full = path.join(dir, entry);
+                try {
+                  const st = fs.statSync(full);
+                  if (st.isDirectory()) { result = scanForFeatured(full); }
+                  else if (entry.toLowerCase() === 'featured.webp') { result = full; }
+                } catch { /* skip */ }
+              }
+            } catch { /* skip */ }
+            return result;
+          };
+          const found = scanForFeatured(PROCESSED_DIR);
+          if (found) {
+            try {
+              fs.mkdirSync(path.dirname(PLACEHOLDER_LOCAL), { recursive: true });
+              fs.copyFileSync(found, PLACEHOLDER_LOCAL);
+              recovered = path.relative(ROOT, PLACEHOLDER_LOCAL).replace(/\\/g, '/');
+              console.log(`  [repair] placeholder 복사: ${path.relative(ROOT, found)} → assets/placeholder/featured.webp`);
+            } catch (e) {
+              console.warn(`  ⚠  placeholder 복사 실패: ${e.message}`);
+            }
+          }
+        }
+      }
+
+      if (recovered) {
+        draft.featured_media_url = recovered;
+        plan.featuredSet = true;
+        console.log(`  [repair] featured_media_url 복구: "${recovered.slice(0, 60)}${recovered.length > 60 ? '…' : ''}"`);
+      } else {
+        console.warn(`  ⚠  featured_media_url 복구 실패 — 소스 없음 (발행은 계속됩니다)`);
+      }
+    }
+  }
+
   // 3) 이미지 보강: featured + content_images 합산이 MIN_TOTAL_IMG 미만이면 보강
   let newContentImages = JSON.parse(JSON.stringify(draft.content_images || []));
   let newFeatured = String(draft.featured_media_url || '').trim();

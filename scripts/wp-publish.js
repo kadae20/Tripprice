@@ -44,6 +44,58 @@ const ROOT = path.resolve(__dirname, '..');
 const DIR_CAMPAIGNS = path.join(ROOT, 'state', 'campaigns');
 
 // ──────────────────────────────────────────────
+// .env 파일 파서 (dotenv 없이, 외부 패키지 0)
+// - 이미 process.env에 있는 키는 절대 덮어쓰지 않음
+// - 반환: 로드된 키 수 (파일 없음 = -1)
+// ──────────────────────────────────────────────
+function loadEnvFile(filePath) {
+  try {
+    const lines = fs.readFileSync(filePath, 'utf8').split('\n');
+    let loaded = 0;
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+      const eqIdx = line.indexOf('=');
+      if (eqIdx < 1) continue;
+      const key = line.slice(0, eqIdx).trim();
+      let val   = line.slice(eqIdx + 1).trim();
+      if ((val.startsWith('"') && val.endsWith('"')) ||
+          (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      if (key && !(key in process.env)) {
+        process.env[key] = val;
+        loaded++;
+      }
+    }
+    return loaded;
+  } catch { return -1; }
+}
+
+// ── WP 환경변수 자동 로드 (.env.local → .env 우선순위) ───────────────────────
+// 로그: 파일명 + 키 수만 출력 (값 절대 미출력)
+function loadEnvIfNeeded() {
+  if (process.env.WP_URL && process.env.WP_USER && process.env.WP_APP_PASS) return;
+  for (const fname of ['.env.local', '.env']) {
+    const fp = path.join(ROOT, fname);
+    const n  = loadEnvFile(fp);
+    if (n >= 0) {
+      console.log(`  [env] ${fname} 로드 완료 (신규 ${n}개 키 적용)`);
+      break;
+    }
+  }
+}
+
+// ── 민감정보 마스킹 (마지막 4자만 노출) ─────────────────────────────────────
+// 예) "abcd-efgh-ijkl" → "****-****-ijkl"
+function maskSecret(s) {
+  const str = String(s || '');
+  if (!str) return '(없음)';
+  if (str.length <= 4) return '****';
+  return str.slice(0, -4).replace(/\S/g, '*') + str.slice(-4);
+}
+
+// ──────────────────────────────────────────────
 // 환경변수 로드 및 검증
 // ──────────────────────────────────────────────
 function loadEnv() {
@@ -59,20 +111,20 @@ function loadEnv() {
   if (missing.length > 0) {
     console.error(
       `[오류] 환경변수 누락: ${missing.join(', ')}\n\n` +
-      `  실행 예시:\n` +
-      `  WP_URL=https://tripprice.net \\\n` +
-      `  WP_USER=admin \\\n` +
-      `  WP_APP_PASS="xxxx xxxx xxxx xxxx" \\\n` +
-      `    node scripts/wp-publish.js wordpress/sample-post.json\n`
+      `  .env.local 파일에 다음 항목을 추가하세요:\n` +
+      `    WP_URL=https://tripprice.net\n` +
+      `    WP_USER=admin\n` +
+      `    WP_APP_PASS=xxxx xxxx xxxx xxxx\n\n` +
+      `  (cp .env.example .env.local 으로 템플릿 복사 후 값 입력)\n`
     );
     process.exit(1);
   }
 
-  // Basic Auth 헤더 생성
-  // WP Application Password는 공백 포함된 상태로 base64 인코딩
-  const credentials = Buffer.from(`${WP_USER}:${WP_APP_PASS}`).toString('base64');
+  // Basic Auth 헤더 강제 생성 (OAuth 토큰이 아닌 Application Password 사용)
+  // 값 자체는 절대 로그에 노출하지 않음
+  const authHeader = buildBasicAuthHeader(WP_USER, WP_APP_PASS);
 
-  return { WP_URL, WP_USER, WP_APP_PASS, authHeader: `Basic ${credentials}` };
+  return { WP_URL, WP_USER, WP_APP_PASS, authHeader };
 }
 
 // ──────────────────────────────────────────────
@@ -500,6 +552,15 @@ async function uploadContentImages(contentImages, env) {
 }
 
 // ──────────────────────────────────────────────
+// Basic Auth 헤더 강제 생성 (항상 WP_USER:WP_APP_PASS 기반)
+// OAuth Bearer 토큰은 사용하지 않음.
+// WP Application Password는 공백 포함된 상태로 base64 인코딩.
+// ──────────────────────────────────────────────
+function buildBasicAuthHeader(WP_USER, WP_APP_PASS) {
+  return `Basic ${Buffer.from(`${WP_USER}:${WP_APP_PASS}`).toString('base64')}`;
+}
+
+// ──────────────────────────────────────────────
 // WP REST API 페이로드 빌드
 // ──────────────────────────────────────────────
 function buildPayload(data, { featuredMediaId = null, injectedContentHtml = null, status = 'draft' } = {}) {
@@ -611,26 +672,52 @@ async function ensureUniqueWpSlug(slug, env) {
 
 // ──────────────────────────────────────────────
 // WordPress REST API 호출
+// - WP_USER + WP_APP_PASS가 있으면 항상 Basic Auth 사용 (OAuth 미사용)
+// - 401 수신 시: 자격증명을 재빌드해 1회 재시도 (만료된 세션 쿠키 등 대응)
+// - 인증 정보(토큰/비밀번호)는 절대 stdout/stderr에 출력하지 않음
 // ──────────────────────────────────────────────
-async function publishToWP(payload, { WP_URL, authHeader }) {
+async function publishToWP(payload, env) {
+  const { WP_URL, WP_USER, WP_APP_PASS } = env;
   const endpoint = `${WP_URL}/wp-json/wp/v2/posts`;
 
-  let response;
-  try {
-    response = await fetch(endpoint, {
+  // Basic Auth 강제: 항상 WP_USER:WP_APP_PASS로 헤더를 새로 빌드
+  const authHeader = buildBasicAuthHeader(WP_USER, WP_APP_PASS);
+
+  async function doPost(auth) {
+    return fetch(endpoint, {
       method: 'POST',
       headers: {
-        'Authorization': authHeader,
+        'Authorization': auth,
         'Content-Type': 'application/json',
         'Accept': 'application/json',
       },
       body: JSON.stringify(payload),
     });
+  }
+
+  let response;
+  try {
+    response = await doPost(authHeader);
   } catch (err) {
     throw new Error(
       `네트워크 오류: ${err.message}\n` +
       `  → WP_URL(${WP_URL})이 올바른지, 서버가 실행 중인지 확인하세요.`
     );
+  }
+
+  // 401: Basic Auth 헤더를 재빌드 후 1회 재시도
+  // (세션 캐시나 프록시 문제 대응 — 자격증명 값은 절대 로그에 미출력)
+  if (response.status === 401 && WP_USER && WP_APP_PASS) {
+    console.warn(
+      `  [auth] HTTP 401 수신 — Basic Auth 헤더 재빌드 후 1회 재시도 중...\n` +
+      `  (인증 실패 원인: WP_USER="${WP_USER}", WP_APP_PASS=****${maskSecret(WP_APP_PASS).slice(-4)})`
+    );
+    const freshAuth = buildBasicAuthHeader(WP_USER, WP_APP_PASS);
+    try {
+      response = await doPost(freshAuth);
+    } catch (err) {
+      throw new Error(`재시도 중 네트워크 오류: ${err.message}`);
+    }
   }
 
   // 응답 본문 파싱 (오류 시에도 JSON 시도)
@@ -650,8 +737,10 @@ async function publishToWP(payload, { WP_URL, authHeader }) {
 
     let hint = '';
     if (response.status === 401) {
-      hint = '\n  힌트: 인증 실패 — WP_USER/WP_APP_PASS를 확인하세요.\n' +
-             '  → WordPress 관리자 > 사용자 > 프로필 > Application Passwords에서 생성';
+      // 인증 실패 힌트: 절대 실제 자격증명 값 미출력
+      hint = '\n  힌트: 인증 실패 (재시도 후에도 401) — WP_USER/WP_APP_PASS를 확인하세요.\n' +
+             '  → WordPress 관리자 > 사용자 > 프로필 > Application Passwords에서 새 비밀번호 발급\n' +
+             '  → OAuth/Bearer 토큰은 지원하지 않습니다. Application Password만 사용하세요.';
     } else if (response.status === 403) {
       hint = '\n  힌트: 권한 없음 — 해당 사용자에게 글 작성 권한이 있는지 확인하세요.';
     } else if (response.status === 404) {
@@ -706,6 +795,9 @@ function saveResult(slug, result, inputPath) {
 // 메인
 // ──────────────────────────────────────────────
 async function main() {
+  // WP 환경변수 자동 로드 (.env.local → .env, 이미 있으면 스킵)
+  loadEnvIfNeeded();
+
   // ── CLI 파싱 ────────────────────────────────────────────────────────────────
   const cliArgs    = process.argv.slice(2);
   const inputArg   = cliArgs.find(a => !a.startsWith('--'));
@@ -726,8 +818,8 @@ async function main() {
       '사용법:\n' +
       '  node scripts/wp-publish.js [JSON 파일 경로]\n\n' +
       '예시:\n' +
-      '  WP_URL=https://tripprice.net WP_USER=admin WP_APP_PASS="xxxx xxxx" \\\n' +
-      '    node scripts/wp-publish.js wordpress/sample-post.json'
+      '  node scripts/wp-publish.js wordpress/sample-post.json\n' +
+      '  (WP 인증정보는 .env.local 파일에서 자동 로드됩니다)'
     );
     process.exit(1);
   }
@@ -839,6 +931,14 @@ async function main() {
   const { outPath, record } = saveResult(data.slug, result, inputPath);
 
   // 8) 성공 출력
+  // machine-readable 한 줄 — editorial-chief.js가 post_id 파싱에 사용
+  console.log(`WP_RESULT_JSON: ${JSON.stringify({
+    post_id: record.post_id,
+    slug:    record.slug,
+    url:     record.edit_url,
+    status:  result.status,
+  })}`);
+
   const isPublished = result.status === 'publish';
   console.log(`\n✓  ${isPublished ? '발행 성공!' : 'Draft 저장 성공!'}`);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -860,7 +960,7 @@ if (require.main === module) {
 
 // 테스트에서 사용할 수 있도록 핵심 함수 export
 module.exports = {
-  validateInput, markdownToHTML, buildPayload,
+  validateInput, markdownToHTML, buildPayload, buildBasicAuthHeader,
   uploadMediaFromUrl, uploadMediaFromFile, uploadContentImages,
   buildFigureHtml, injectImagesIntoHtml, ensureUniqueWpSlug,
 };

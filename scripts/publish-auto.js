@@ -29,11 +29,39 @@ const path          = require('path');
 const { spawnSync } = require('child_process');
 const { runQA }     = require('./qa-wp-post');
 
-const ROOT         = path.resolve(__dirname, '..');
-const DRAFTS_DIR   = path.join(ROOT, 'wordpress', 'drafts');
-const PUBLISHED_DIR = path.join(ROOT, 'wordpress', 'published');
-const FAILED_DIR   = path.join(ROOT, 'wordpress', 'failed');
-const LOGS_DIR     = path.join(ROOT, 'logs');
+const ROOT           = path.resolve(__dirname, '..');
+const DRAFTS_DIR     = path.join(ROOT, 'wordpress', 'drafts');
+const PUBLISHED_DIR  = path.join(ROOT, 'wordpress', 'published');
+const FAILED_DIR     = path.join(ROOT, 'wordpress', 'failed');
+const QUARANTINE_DIR = path.join(ROOT, 'wordpress', 'quarantine');
+const LOGS_DIR       = path.join(ROOT, 'logs');
+
+// ── .env.local 자동 로드 (process.env에 이미 있는 키는 덮어쓰지 않음) ─────────
+// 민감정보 값은 절대 로그에 출력하지 않음
+;(function loadEnvLocal() {
+  for (const fname of ['.env.local', '.env']) {
+    const fp = path.join(ROOT, fname);
+    try {
+      const lines = fs.readFileSync(fp, 'utf8').split('\n');
+      let loaded = 0;
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (!line || line.startsWith('#')) continue;
+        const eqIdx = line.indexOf('=');
+        if (eqIdx < 1) continue;
+        const key = line.slice(0, eqIdx).trim();
+        let val   = line.slice(eqIdx + 1).trim();
+        if ((val.startsWith('"') && val.endsWith('"')) ||
+            (val.startsWith("'") && val.endsWith("'"))) {
+          val = val.slice(1, -1);
+        }
+        if (key && !(key in process.env)) { process.env[key] = val; loaded++; }
+      }
+      if (loaded > 0) console.log(`  [env] ${fname} 로드 완료 (신규 ${loaded}개 키 적용)`);
+      break;
+    } catch { /* 파일 없으면 다음 시도 */ }
+  }
+}());
 
 // ── CLI 파싱 ──────────────────────────────────────────────────────────────────
 function parseArgs() {
@@ -120,6 +148,46 @@ function moveFile(src, destDir) {
   const dest = path.join(destDir, path.basename(src));
   fs.renameSync(src, dest);
   return dest;
+}
+
+// ── 발행 시도 횟수 읽기/쓰기 ──────────────────────────────────────────────────
+function getPublishAttempts(draftFile) {
+  try {
+    const d = JSON.parse(fs.readFileSync(draftFile, 'utf8'));
+    return (d.workflow_state && d.workflow_state.publish_attempts) || 0;
+  } catch { return 0; }
+}
+
+function incrementPublishAttempts(draftFile) {
+  try {
+    const d = JSON.parse(fs.readFileSync(draftFile, 'utf8'));
+    if (!d.workflow_state) d.workflow_state = {};
+    d.workflow_state.publish_attempts = (d.workflow_state.publish_attempts || 0) + 1;
+    d.workflow_state.last_publish_attempt = new Date().toISOString();
+    fs.writeFileSync(draftFile, JSON.stringify(d, null, 2), 'utf8');
+    return d.workflow_state.publish_attempts;
+  } catch { return 0; }
+}
+
+// ── 격리(quarantine) 이동 — publish_attempts >= 3 ────────────────────────────
+function quarantineDraft(draftFile, reason) {
+  fs.mkdirSync(QUARANTINE_DIR, { recursive: true });
+  // 격리 전 draft에 메타 기록
+  try {
+    const d = JSON.parse(fs.readFileSync(draftFile, 'utf8'));
+    if (!d.workflow_state) d.workflow_state = {};
+    d.workflow_state.quarantine_reason = reason;
+    d.workflow_state.quarantine_at     = new Date().toISOString();
+    fs.writeFileSync(draftFile, JSON.stringify(d, null, 2), 'utf8');
+  } catch { /* 메타 쓰기 실패해도 이동은 진행 */ }
+  return moveFile(draftFile, QUARANTINE_DIR);
+}
+
+// ── 발행 오류가 featured-media 관련인지 판별 ──────────────────────────────────
+function isFeaturedMediaError(stderr) {
+  const s = String(stderr || '').toLowerCase();
+  return s.includes('featured_media') || s.includes('featured media') ||
+         s.includes('attachment') || s.includes('invalid_param') && s.includes('media');
 }
 
 // ── QA 결과 저장 ──────────────────────────────────────────────────────────────
@@ -315,9 +383,23 @@ function main() {
       continue;
     }
 
-    // ── wp-publish 실행 ────────────────────────────────────────────────────
+    // ── wp-publish 실행 (publish_attempts 추적 + featured-media 오류 시 1회 재시도) ──
     console.log(`  → wp-publish.js 실행 중... (${summary.published + 1}/${maxPublish})`);
-    const pub = runWpPublish(draftFile);
+    const attempts0 = incrementPublishAttempts(draftFile);
+    let pub = runWpPublish(draftFile);
+
+    // featured-media 관련 오류이면 patch 후 1회 재시도
+    if (!pub.ok && isFeaturedMediaError(pub.stderr + pub.stdout)) {
+      console.log(`  ⚠  featured-media 오류 감지 — patch-draft-minimums 후 재시도...`);
+      runPatch(draftFile);
+      const attempts1 = incrementPublishAttempts(draftFile);
+      pub = runWpPublish(draftFile);
+      if (!pub.ok) {
+        console.log(`  ❌ 재시도 실패 (publish_attempts=${attempts1})`);
+      } else {
+        console.log(`  ✅ 재시도 성공 (publish_attempts=${attempts1})`);
+      }
+    }
 
     if (pub.ok) {
       summary.published++;
@@ -326,11 +408,20 @@ function main() {
       logRecords.push({ draftFile: path.basename(draftFile), patched: wasPatched, seoScore: qa.seoScore, published: true, wpSummary: pub.stdout.slice(0, 200).trim() || null, savedAt: new Date().toISOString() });
     } else {
       summary.errors++;
-      const failResult = { ...qa, publishError: pub.stderr.slice(0, 500), publishedAt: new Date().toISOString() };
-      const savedQA = saveQAResult(failResult, FAILED_DIR);
-      console.log(`  ❌ 발행 실패 → ${path.relative(ROOT, savedQA)}`);
-      if (pub.stderr) console.log(`     ${pub.stderr.slice(0, 200)}`);
-      logRecords.push({ draftFile: path.basename(draftFile), patched: wasPatched, seoScore: qa.seoScore, published: false, wpError: pub.stderr.slice(0, 300).trim() || null, savedAt: new Date().toISOString() });
+      // publish_attempts >= 3 이면 quarantine으로 이동
+      const finalAttempts = getPublishAttempts(draftFile);
+      if (finalAttempts >= 3) {
+        const quarantineReason = `publish_attempts=${finalAttempts}: ${(pub.stderr || '').slice(0, 200).trim()}`;
+        const qDest = quarantineDraft(draftFile, quarantineReason);
+        console.log(`  🚫 격리(quarantine) 이동 (publish_attempts=${finalAttempts}) → ${path.relative(ROOT, qDest)}`);
+        logRecords.push({ draftFile: path.basename(draftFile), patched: wasPatched, seoScore: qa.seoScore, published: false, quarantined: true, publish_attempts: finalAttempts, quarantine_reason: quarantineReason.slice(0, 300), savedAt: new Date().toISOString() });
+      } else {
+        const failResult = { ...qa, publishError: pub.stderr.slice(0, 500), publish_attempts: finalAttempts, publishedAt: new Date().toISOString() };
+        const savedQA = saveQAResult(failResult, FAILED_DIR);
+        console.log(`  ❌ 발행 실패 (publish_attempts=${finalAttempts}) → ${path.relative(ROOT, savedQA)}`);
+        if (pub.stderr) console.log(`     ${pub.stderr.slice(0, 200)}`);
+        logRecords.push({ draftFile: path.basename(draftFile), patched: wasPatched, seoScore: qa.seoScore, published: false, publish_attempts: finalAttempts, wpError: pub.stderr.slice(0, 300).trim() || null, savedAt: new Date().toISOString() });
+      }
     }
     console.log('');
   }
