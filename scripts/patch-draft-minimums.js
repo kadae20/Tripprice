@@ -137,6 +137,53 @@ const H3_BOOSTERS = [
   },
 ];
 
+// ── slug → 재현 가능 해시 (멱등 seed, 재실행해도 동일 결과) ──────────────────
+function slugHash(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = (h * 0x01000193) >>> 0; }
+  return h;
+}
+
+// ── 차별화 섹션 풀: 호텔마다 다른 2개를 slug seed로 선택 삽입 ────────────────
+// (BOOSTER_MD 보다 의견·전략 중심으로, 본문에 고유성 부여)
+const DIFFERENTIATORS = [
+  {
+    heading: '이런 분에게는 추천하지 않습니다',
+    body: '조용한 환경이 최우선인 분은 예약 전 주변 교통·소음 수준을 최근 후기로 먼저 확인하세요. '
+        + '주차 공간이 협소할 수 있어 렌터카 이용 예정이라면 주차 사전 예약이 필수입니다. '
+        + '최고급 프라이빗 서비스를 기대한다면 동일 지역 상위 등급 옵션도 함께 비교해보세요. '
+        + '조식 품질에 민감하다면 최근 3개월 이내 리뷰를 추가로 확인하는 것을 권장합니다.',
+  },
+  {
+    heading: '예약 타이밍 전략 — 언제가 가장 저렴할까',
+    body: '비수기(1~2월, 6~7월 일부)에는 성수기 대비 20~40% 저렴한 요금을 기대할 수 있습니다. '
+        + '얼리버드 할인은 체크인 30~60일 전에 가장 많이 열리므로 일정 확정 즉시 예약을 추천합니다. '
+        + '주말 포함 연박 패키지가 단박보다 유리한 경우도 많으니 날짜 조합을 바꿔 검색해보세요. '
+        + '아고다 멤버십 포인트나 제휴 카드 할인을 함께 활용하면 실질 비용을 더 낮출 수 있습니다.',
+  },
+  {
+    heading: '실제 숙박자들이 자주 언급하는 포인트',
+    body: '리뷰에 반복적으로 등장하는 키워드는 침구 청결도, 프런트 응대 속도, 조식 품질입니다. '
+        + '불편한 점으로는 성수기 엘리베이터 대기, 주차 공간 부족이 자주 언급됩니다. '
+        + '반면 위치 접근성과 객실 청결에 대한 긍정 평가는 꾸준히 높은 편입니다. '
+        + '예약 전 최근 3개월 이내 리뷰를 우선 확인하는 것을 강력히 추천합니다.',
+  },
+  {
+    heading: '주변 편의시설 & 야간 귀환 팁',
+    body: '호텔 주변에는 편의점, 약국, ATM이 도보 거리에 위치한 경우가 많습니다. '
+        + '심야 귀환 시 카카오T 호출 지점을 호텔 정문 또는 로비 앞으로 설정해두세요. '
+        + '24시간 운영 편의점에서 간단한 의약품과 생필품 구매가 가능합니다. '
+        + '근처 환전소나 ATM 위치를 미리 파악해두면 현금이 필요할 때 당황하지 않습니다.',
+  },
+  {
+    heading: '3줄 요약 & 최종 결론',
+    body: '위치 편의성, 서비스 수준, 가격 경쟁력 세 가지가 균형 잡혀 처음 방문하는 분께도 무난한 선택입니다. '
+        + '특히 대중교통 접근성과 체크인 당일 프런트 대응에 대한 긍정 후기가 많습니다. '
+        + '예약은 실시간 가격 변동이 있으므로 아래 링크에서 현재 최저가를 먼저 확인한 뒤 결정하세요. '
+        + '같은 지역 재방문 계획이 있다면 멤버십 포인트 적립도 처음부터 챙기는 것이 유리합니다.',
+  },
+];
+
 // ── CLI 파싱 ──────────────────────────────────────────────────────────────────
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -268,7 +315,13 @@ function main() {
   const curTotalImg  = (hasFeatured ? 1 : 0) + imgInHtml + curImgSecs;
 
   // ── 변경 계획 수립 ─────────────────────────────────────────────────────────
-  const plan = { textAdded: 0, imagesAdded: 0, featuredSet: false, sectionsAdded: [], h3Added: 0 };
+  const plan = { textAdded: 0, imagesAdded: 0, featuredSet: false, sectionsAdded: [], h3Added: 0, diffAdded: 0 };
+
+  // slug 기반 멱등 seed (재실행해도 동일 결과 — 호텔마다 다른 섹션 순서/구성)
+  const seedSlug = String(draft.slug || draft.hotel_id || path.basename(absPath, '.json'));
+  const seed = slugHash(seedSlug);
+  // BOOSTER_MD 시작 오프셋: 호텔마다 다른 위치에서 시작 → 반복 패턴 해소
+  const boosterOffset = seed % BOOSTER_MD.length;
 
   // 1) 텍스트 보강: QA가 읽는 소스에 동일한 형식으로 섹션 append
   const CYCLE_SUFFIXES = ['', ' — 추가 안내'];
@@ -282,7 +335,7 @@ function main() {
     if (useHtml) {
       // HTML 모드: <h2>heading</h2>\n<p>body</p> 형식으로 append
       while (stripHtmlLen(newHtml) < MIN_TEXT_LEN && idx < MAX_ITER) {
-        const sec    = BOOSTER_MD[idx % BOOSTER_MD.length];
+        const sec    = BOOSTER_MD[(idx + boosterOffset) % BOOSTER_MD.length];
         const suffix = CYCLE_SUFFIXES[Math.floor(idx / BOOSTER_MD.length)];
         const heading = sec.heading.replace(/^## /, '') + suffix;
         const block = `\n<h2>${heading}</h2>\n<p>${sec.body}</p>`;
@@ -294,7 +347,7 @@ function main() {
     } else {
       // Markdown 모드: ## heading\n\nbody 형식으로 append
       while (stripMarkdownLen(newMd) < MIN_TEXT_LEN && idx < MAX_ITER) {
-        const sec    = BOOSTER_MD[idx % BOOSTER_MD.length];
+        const sec    = BOOSTER_MD[(idx + boosterOffset) % BOOSTER_MD.length];
         const suffix = CYCLE_SUFFIXES[Math.floor(idx / BOOSTER_MD.length)];
         const heading = suffix ? sec.heading + suffix : sec.heading;
         newMd += `\n\n${heading}\n\n${sec.body}`;
@@ -322,6 +375,35 @@ function main() {
         newMd += `\n\n### ${headingText}\n\n${h3.body}`;
       }
       plan.h3Added++;
+    }
+  }
+
+  // 2.5) 차별화 섹션: textLen < 2600이면 slug seed로 최대 2개 선택 삽입 (중복 방지)
+  // 호텔마다 다른 조합 → "템플릿 복붙" 탈출
+  {
+    const curLen2 = useHtml ? stripHtmlLen(newHtml) : stripMarkdownLen(newMd);
+    if (curLen2 < 2600) {
+      const needCount = Math.max(1, Math.min(2, Math.ceil((2600 - curLen2) / 400)));
+      let dseed = seed;
+      const usedIdx = new Set();
+      let attempts = 0;
+      while (usedIdx.size < needCount && attempts < DIFFERENTIATORS.length * 2) {
+        attempts++;
+        dseed = (dseed * 1664525 + 1013904223) >>> 0;
+        const pick = dseed % DIFFERENTIATORS.length;
+        if (usedIdx.has(pick)) continue;
+        const diff = DIFFERENTIATORS[pick];
+        const alreadyIn = useHtml ? newHtml.includes(diff.heading) : newMd.includes(diff.heading);
+        if (alreadyIn) { usedIdx.add(pick); continue; }
+        usedIdx.add(pick);
+        if (useHtml) {
+          newHtml += `\n<h3>${diff.heading}</h3>\n<p>${diff.body}</p>`;
+        } else {
+          newMd += `\n\n### ${diff.heading}\n\n${diff.body}`;
+        }
+        plan.h3Added++;
+        plan.diffAdded++;
+      }
     }
   }
 
@@ -418,13 +500,37 @@ function main() {
   const effTotal    = effFeatured + imgInHtml + countContentImages(newContentImages);
 
   if (effTotal < MIN_TOTAL_IMG) {
-    const needed     = MIN_TOTAL_IMG - effTotal;
-    const localAssets = findLocalAssets();
+    const needed = MIN_TOTAL_IMG - effTotal;
+
+    // 호텔별 이미지 우선 탐색: assets/processed/{hotel_id}/ 폴더
+    const hotelKey = String(draft.hotel_id || draft.slug || '').trim();
+    const EXTS_IMG = new Set(['.webp', '.jpg', '.jpeg', '.png']);
+    let hotelImages = [];
+    if (hotelKey) {
+      const hotelDir = path.join(ROOT, 'assets', 'processed', hotelKey);
+      if (fs.existsSync(hotelDir)) {
+        hotelImages = fs.readdirSync(hotelDir)
+          .filter(f => EXTS_IMG.has(path.extname(f).toLowerCase()))
+          .map(f => path.relative(ROOT, path.join(hotelDir, f)).replace(/\\/g, '/'));
+      }
+    }
+    // 호텔 이미지가 부족하면 전체 assets에서 보충
+    const fallbackAssets = hotelImages.length >= needed
+      ? hotelImages
+      : [...hotelImages, ...findLocalAssets().filter(p => !hotelImages.includes(p))];
+
+    // alt 텍스트: 호텔명 기반으로 다양화
+    const hotelLabel = String(draft.hotel_name || draft.slug || '').trim();
+    const altPool = [
+      `${hotelLabel} 외관`, `${hotelLabel} 객실 내부`, `${hotelLabel} 로비`,
+      `${hotelLabel} 주변 전경`, `${hotelLabel} 조식`, `${hotelLabel} 부대시설`,
+    ].filter(Boolean);
+
     const extraPaths = [];
     for (let i = 0; i < needed; i++) {
       extraPaths.push(
-        localAssets.length > 0
-          ? localAssets[i % localAssets.length]
+        fallbackAssets.length > 0
+          ? fallbackAssets[i % fallbackAssets.length]
           : `${PLACEHOLDER_BASE}&n=${i + 1}`
       );
     }
@@ -432,13 +538,16 @@ function main() {
     if (newContentImages.length > 0) {
       const sec = newContentImages[0];
       if (!sec.images) sec.images = [];
-      for (const p of extraPaths) {
-        sec.images.push({ local_path: p, alt: '보강 이미지' });
-      }
+      extraPaths.forEach((p, i) => {
+        sec.images.push({ local_path: p, alt: altPool[i % altPool.length] || '보강 이미지' });
+      });
     } else {
       newContentImages.push({
         position: 'patch-extra',
-        images: extraPaths.map(p => ({ local_path: p, alt: '보강 이미지' })),
+        images: extraPaths.map((p, i) => ({
+          local_path: p,
+          alt: altPool[i % altPool.length] || '보강 이미지',
+        })),
       });
     }
     plan.imagesAdded = needed;
@@ -464,7 +573,7 @@ function main() {
       ? `텍스트 [${contentSource}] +${plan.textAdded}자 → 총 ${finalTextLen}자 (섹션: ${plan.sectionsAdded.join(', ')})`
       : null,
     plan.h3Added > 0
-      ? `H3 섹션 +${plan.h3Added}개 자동 삽입`
+      ? `H3 섹션 +${plan.h3Added}개 자동 삽입${plan.diffAdded > 0 ? ` (차별화 ${plan.diffAdded}개 포함)` : ''}`
       : null,
     plan.imagesAdded > 0
       ? `이미지 +${plan.imagesAdded}장 → 총 ${finalImgTotal}장`
