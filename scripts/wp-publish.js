@@ -173,12 +173,18 @@ function markdownToHTML(md) {
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
       // Italic
       .replace(/\*(.+?)\*/g, '<em>$1</em>')
-      // 링크 (외부/제휴 링크: target=_blank + rel 자동 삽입 — oEmbed 임베드/iframe 차단)
+      // 링크 (외부/제휴 링크: target=_blank + rel + UTM 자동 삽입 — oEmbed 임베드/iframe 차단)
       .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, href) => {
         if (!/^https?:\/\//.test(href)) return `<a href="${href}">${text}</a>`;
         const isAffiliate = /agoda\.com|booking\.com/.test(href);
+        let finalHref = href;
+        // 제휴 링크에 UTM 파라미터 자동 주입 (이미 있으면 스킵)
+        if (isAffiliate && !href.includes('utm_source')) {
+          const sep = href.includes('?') ? '&' : '?';
+          finalHref = `${href}${sep}utm_source=tripprice&utm_medium=referral&utm_campaign=hotel_review`;
+        }
         const rel = isAffiliate ? 'nofollow sponsored noopener noreferrer' : 'noopener noreferrer';
-        return `<a href="${href}" target="_blank" rel="${rel}">${text}</a>`;
+        return `<a href="${finalHref}" target="_blank" rel="${rel}">${text}</a>`;
       });
   }
 

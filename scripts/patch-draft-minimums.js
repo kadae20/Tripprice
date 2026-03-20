@@ -184,6 +184,63 @@ const DIFFERENTIATORS = [
   },
 ];
 
+// ── QUALITY_PACK: 호텔마다 다른 리드/비추천/체크리스트 (<!-- TP:QUALITY_PACK --> 마커로 중복 방지) ──
+
+// 위치 힌트: slug 키워드 → 지역/교통 문구
+const LOCATION_MAP = [
+  ['gangnam',    '강남역 도보권',       '지하철 2호선/신분당선'],
+  ['hongdae',    '홍대입구역 인근',     '지하철 2호선'],
+  ['myeongdong', '명동역 도보권',       '지하철 4호선'],
+  ['seomyeon',   '서면역 인근',         '부산 지하철 1·2호선'],
+  ['seogyo',     '홍대 서교동',         '지하철 2호선 홍대입구역'],
+  ['dongdaemun', '동대문역사문화공원역 인근', '지하철 2·4·5호선'],
+  ['itaewon',    '이태원역 인근',       '지하철 6호선'],
+  ['sinchon',    '신촌역 인근',         '지하철 2호선'],
+  ['jongno',     '종로 중심가',         '지하철 1·3호선'],
+  ['busan',      '부산 도심',           '지하철/시내버스'],
+  ['gupo',       '구포역 인근',         '부산 지하철 3호선'],
+  ['gangdong',   '강동구',              '지하철 5호선'],
+];
+function getLocHint(slug) {
+  const s = String(slug).toLowerCase();
+  for (const [kw, area, transport] of LOCATION_MAP) {
+    if (s.includes(kw)) return { area, transport };
+  }
+  return { area: '서울 주요 지역', transport: '대중교통 이용 편리' };
+}
+function extractHotelName(draft) {
+  if (draft.hotel_name) return String(draft.hotel_name).trim();
+  const title = String(draft.post_title || '').replace(/\s*(후기|리뷰|review|\d{4}(-\d{2}(-\d{2})?)?)\s*$/i, '').trim();
+  if (title) return title;
+  return String(draft.slug || '').replace(/-(review|2\d{3}.*)?$/, '').replace(/-/g, ' ')
+    .replace(/\b\w/g, c => c.toUpperCase());
+}
+
+// 리드 문단: slug seed로 1개 선택 (5종)
+const QP_LEADS = [
+  (name, loc) => `${name}은 ${loc.area}에 위치한 숙소입니다. ${loc.transport}를 이용하면 주요 관광지·쇼핑·맛집까지 효율적으로 이동할 수 있으며, 짧은 일정이라도 동선 낭비 없이 여행을 즐길 수 있습니다. 이 글에서는 예약 전 꼭 알아야 할 포인트들을 정리했습니다.`,
+  (name, loc) => `${loc.area} 여행을 계획 중이라면 ${name}이 유력한 선택지가 될 수 있습니다. ${loc.transport}에서 가까운 입지 덕분에 대중교통으로 서울 전역을 편리하게 오갈 수 있고, 체크인부터 체크아웃까지 실질적으로 도움이 될 정보들을 아래에 정리했습니다.`,
+  (name, loc) => `${name}: ${loc.area}, ${loc.transport} 이용 가능. 가성비와 접근성 두 가지를 모두 고려하는 여행자에게 자주 언급되는 옵션입니다. 장단점을 솔직하게 정리하니 예약 전에 한번 확인해보세요.`,
+  (name, loc) => `처음 방문하는 ${loc.area}에서 숙소 선택이 막막하다면 ${name}을 먼저 검토해보세요. 위치·가격·실제 후기 기반으로 "이 호텔이 어떤 사람에게 맞는지"를 아래에 정리했습니다.`,
+  (name, loc) => `${name} 예약을 고민 중이신가요? ${loc.area}의 ${loc.transport} 접근성과 함께, 실제 숙박자들이 자주 언급하는 장단점과 예약 시 주의사항을 한 번에 확인할 수 있습니다.`,
+];
+
+// 비추천 섹션: slug seed로 1개 선택 (5종) — 각각 다른 근거
+const QP_BAD_FITS = [
+  (name) => `**${name}이 맞지 않을 수 있는 경우:** 무조건 저렴한 가격이 최우선인 분(위치 프리미엄이 요금에 반영됨), 취사·세탁 시설이 필수인 장기 체류자, 자차 이용 예정인데 주차 비용·공간이 불확실한 분, 방음에 민감해 완전한 정숙이 필요한 분(도심 입지 특성상 소음 가능성).`,
+  (name) => `**이런 여행자에게는 다른 옵션을 추천합니다:** 반려동물 동반이 필요한 분(투숙 정책 반드시 확인), 오전 1시 이전 얼리 체크인이 불가능하면 안 되는 분, 1박에 조식 2회 이상 이용 계획인 분(단독 구매가 패키지보다 비쌀 수 있음), 오션뷰·파노라마 시티뷰가 반드시 필요한 분.`,
+  (name) => `**${name}을 피해야 할 여행자:** 절대적인 정숙을 요구하는 분(교통·상업 지구 입지), 5성급 수준의 컨시어지·발렛 서비스를 기대하는 분, 트윈룸·패밀리룸 재고가 항상 한정적이므로 4인 이상 단체 여행에는 사전 확인 필수, 완전한 취사 시설이 있는 레지던스 스타일을 원하는 분.`,
+  (name) => `**주의: 이런 경우라면 재고려가 필요합니다.** 3박 이상 장기 체류 시 세탁기·주방 부재가 불편할 수 있습니다. 주차 공간이 협소하거나 별도 유료인 경우가 많아 자차 여행자는 예약 전 반드시 확인하세요. 야간·심야 체크인(자정 이후)이 필요한 분은 프런트 운영 시간을 사전 확인해야 합니다.`,
+  (name) => `**솔직한 비추천 케이스:** 에어비앤비 스타일의 자유로운 취사·체크인을 원하는 분, 추가 요금(리조트 피·서비스 차지) 없는 투명한 요금제가 필수인 분, 단순 저가 게스트하우스 수준을 기대하는 분(가격대가 그보다 높을 수 있음), 완전한 금연 환경이 필수인데 흡연 구역 배치가 불확실한 경우.`,
+];
+
+// 현장 체크리스트: slug seed로 1개 선택 (3종)
+const QP_CHECKLISTS = [
+  ['신분증/여권 지참 필수 (체크인)', '냉난방 작동 즉시 확인 (입실 직후)', '엘리베이터 위치·대기 시간 파악 (짐 많으면 카트 요청)', '상층/안쪽 객실 요청 (소음 최소화)', '조식 포함 여부·시간 확인 (일반적으로 07~10시)', '주차 요금·사전 예약 여부 확인'],
+  ['와이파이 속도 체크 (화상회의·스트리밍)', '귀중품 객실 금고 보관 (비밀번호 직접 설정)', '체크아웃 전날 레이트 체크아웃 협의 (추가 요금)', '인근 편의점·약국·ATM 위치 사전 파악', '냉장고·전자레인지 등 편의 가전 유무 확인', '카카오T 앱 설치 (심야 귀환 대비)'],
+  ['얼리 체크인 가능 여부 확인 (추가 요금 가능)', '객실 방향·뷰 사전 요청 (보장은 어렵지만 요청 가능)', '암막 커튼 유무 확인 (숙면 중시 시)', '특별 요청(기념일·유아침대) 예약 메모 기재', '어메니티 추가 요청 방법 프런트 확인', '비상구 위치 및 안전 안내문 확인'],
+];
+
 // ── CLI 파싱 ──────────────────────────────────────────────────────────────────
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -315,7 +372,7 @@ function main() {
   const curTotalImg  = (hasFeatured ? 1 : 0) + imgInHtml + curImgSecs;
 
   // ── 변경 계획 수립 ─────────────────────────────────────────────────────────
-  const plan = { textAdded: 0, imagesAdded: 0, featuredSet: false, sectionsAdded: [], h3Added: 0, diffAdded: 0 };
+  const plan = { textAdded: 0, imagesAdded: 0, featuredSet: false, sectionsAdded: [], h3Added: 0, diffAdded: 0, qpAdded: false };
 
   // slug 기반 멱등 seed (재실행해도 동일 결과 — 호텔마다 다른 섹션 순서/구성)
   const seedSlug = String(draft.slug || draft.hotel_id || path.basename(absPath, '.json'));
@@ -407,6 +464,55 @@ function main() {
     }
   }
 
+  // 2.8) QUALITY_PACK: 리드/비추천/체크리스트 삽입 (<!-- TP:QUALITY_PACK --> 마커로 중복 방지)
+  // 호텔마다 slug seed로 다른 조합 선택 → "완전히 다른 느낌" 보장
+  {
+    const QP_MARKER = '<!-- TP:QUALITY_PACK -->';
+    const alreadyHasQP = newMd.includes(QP_MARKER) || newHtml.includes(QP_MARKER);
+    if (!alreadyHasQP) {
+      const hotelNameQP = extractHotelName(draft);
+      const locQP = getLocHint(seedSlug);
+      // seed 기반 선택 (멱등)
+      let qs = seed;
+      const leadIdx    = qs % QP_LEADS.length;
+      qs = (qs * 1664525 + 1013904223) >>> 0;
+      const badFitIdx  = qs % QP_BAD_FITS.length;
+      qs = (qs * 1664525 + 1013904223) >>> 0;
+      const checkIdx   = qs % QP_CHECKLISTS.length;
+
+      const leadText   = QP_LEADS[leadIdx](hotelNameQP, locQP);
+      const badFitText = QP_BAD_FITS[badFitIdx](hotelNameQP);
+      const checkItems = QP_CHECKLISTS[checkIdx];
+
+      if (useHtml) {
+        // 리드: H1 바로 뒤 삽입 (없으면 앞에 붙임)
+        const h1m = newHtml.match(/<h1[^>]*>.*?<\/h1>/i);
+        if (h1m) {
+          const pos = newHtml.indexOf(h1m[0]) + h1m[0].length;
+          newHtml = newHtml.slice(0, pos) + `\n<p>${leadText}</p>` + newHtml.slice(pos);
+        }
+        // 비추천 + 체크리스트 + 마커 → 끝에 추가
+        const checkHtml = checkItems.map(c => `<li>${c}</li>`).join('');
+        newHtml += `\n<h3>이 숙소가 맞지 않는 경우</h3>\n<p>${badFitText}</p>`
+                + `\n<h3>예약·체크인 체크리스트</h3>\n<ul>${checkHtml}</ul>`
+                + `\n${QP_MARKER}`;
+      } else {
+        // 리드: H1 바로 뒤 삽입
+        const h1m = newMd.match(/^# .+/m);
+        if (h1m) {
+          const pos = newMd.indexOf(h1m[0]) + h1m[0].length;
+          newMd = newMd.slice(0, pos) + `\n\n${leadText}` + newMd.slice(pos);
+        }
+        const checkMd = checkItems.map(c => `- ${c}`).join('\n');
+        newMd += `\n\n### 이 숙소가 맞지 않는 경우\n\n${badFitText}`
+               + `\n\n### 예약·체크인 체크리스트\n\n${checkMd}`
+               + `\n\n${QP_MARKER}`;
+      }
+      plan.qpAdded = true;
+      plan.h3Added += 2;
+    }
+  }
+
   // 3-pre) featured_media_url 자동 복구:
   //   - 비어 있거나
   //   - 로컬 assets/ 경로인데 파일이 존재하지 않는 경우
@@ -434,7 +540,37 @@ function main() {
         }
       }
 
-      // b) assets/placeholder/featured.webp
+      // b1) hotel-specific processed 폴더에서 대체 후보 탐색:
+      //     우선순위: *featured* > *main* > 가장 큰 파일(용량 기준)
+      if (!recovered) {
+        const hotelKeyFeat = String(draft.hotel_id || draft.slug || '').trim();
+        const hotelProcDir = hotelKeyFeat
+          ? path.join(ROOT, 'assets', 'processed', hotelKeyFeat)
+          : null;
+        if (hotelProcDir && fs.existsSync(hotelProcDir)) {
+          const IMG_EXTS = new Set(['.webp', '.jpg', '.jpeg', '.png']);
+          let candidates = [];
+          try {
+            for (const f of fs.readdirSync(hotelProcDir)) {
+              if (!IMG_EXTS.has(path.extname(f).toLowerCase())) continue;
+              const full = path.join(hotelProcDir, f);
+              let size = 0;
+              try { size = fs.statSync(full).size; } catch { /* skip */ }
+              candidates.push({ full, name: f.toLowerCase(), size });
+            }
+          } catch { /* skip */ }
+          if (candidates.length > 0) {
+            const byFeatured = candidates.filter(c => c.name.includes('featured'));
+            const byMain     = candidates.filter(c => c.name.includes('main'));
+            const best = byFeatured[0] || byMain[0]
+              || candidates.sort((a, b) => b.size - a.size)[0];
+            recovered = path.relative(ROOT, best.full).replace(/\\/g, '/');
+            console.log(`  [repair] hotel-specific 이미지 → featured: ${recovered.slice(0, 60)}`);
+          }
+        }
+      }
+
+      // b2) assets/placeholder/featured.webp
       if (!recovered && fs.existsSync(PLACEHOLDER_LOCAL)) {
         recovered = path.relative(ROOT, PLACEHOLDER_LOCAL).replace(/\\/g, '/');
       }
@@ -559,7 +695,7 @@ function main() {
   }
 
   // ── 변경 없으면 종료 ────────────────────────────────────────────────────────
-  const hasChanges = plan.textAdded > 0 || plan.imagesAdded > 0 || plan.featuredSet || plan.h3Added > 0;
+  const hasChanges = plan.textAdded > 0 || plan.imagesAdded > 0 || plan.featuredSet || plan.h3Added > 0 || plan.qpAdded;
   if (!hasChanges) {
     console.log(`  이미 기준 충족 — 변경 없음 (${path.basename(absPath)})`);
     process.exit(0);
@@ -580,6 +716,9 @@ function main() {
       : null,
     plan.featuredSet
       ? `featured_media_url → "${newFeatured.slice(0, 60)}${newFeatured.length > 60 ? '…' : ''}"`
+      : null,
+    plan.qpAdded
+      ? `QUALITY_PACK 삽입 (리드+비추천+체크리스트, seed=${seed % 100000})`
       : null,
   ].filter(Boolean);
 
