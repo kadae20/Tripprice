@@ -20,8 +20,9 @@
  */
 'use strict';
 
-const fs   = require('fs');
-const path = require('path');
+const fs            = require('fs');
+const path          = require('path');
+const { spawnSync } = require('child_process');
 
 const ROOT    = path.resolve(__dirname, '..');
 const BAK_DIR = path.join(ROOT, 'wordpress', 'drafts', '.bak');
@@ -343,6 +344,23 @@ function main() {
   } catch (e) {
     console.error(`JSON 파싱 실패: ${e.message}`);
     process.exit(1);
+  }
+
+  // ── 0) 이미지 사전 확보: resolveHotelImages 1회 실행 (실패해도 계속) ────────
+  if (!dryRun) {
+    const hotelIdForImg = String(draft.hotel_id || draft.slug || '').trim();
+    const resolveScript = path.join(__dirname, 'resolveHotelImages.js');
+    if (hotelIdForImg && fs.existsSync(resolveScript)) {
+      const rr = spawnSync(process.execPath, [
+        resolveScript,
+        `--hotel-id=${hotelIdForImg}`,
+        `--draft=${absPath}`,
+      ], { encoding: 'utf8', env: process.env, cwd: ROOT, timeout: 35000 });
+      if (rr.stdout) process.stdout.write(rr.stdout);
+      if (rr.stderr && rr.status !== 0) {
+        console.warn(`  ⚠  resolveHotelImages 오류 (계속): ${rr.stderr.slice(0, 120)}`);
+      }
+    }
   }
 
   // ── QA와 동일한 소스 탐지 ─────────────────────────────────────────────────
