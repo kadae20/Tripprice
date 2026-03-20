@@ -10,7 +10,8 @@
  *   node scripts/wp-publish.js wordpress/sample-post.json --status=publish
  *
  * 옵션:
- *   --status=draft|publish   발행 상태 (기본: draft)
+ *   --status=draft|publish|future    발행 상태 (기본: publish)
+ *   --schedule-minutes=N             future 예약 발행: 현재+N분 후 (--status=future 와 함께 사용)
  *
  * 필수 환경변수:
  *   WP_URL      — 워드프레스 사이트 URL (예: https://tripprice.net)
@@ -300,23 +301,6 @@ function validateInput(data) {
     errors.push('필수 필드 누락: content_html 또는 content_markdown 중 하나 필요');
   }
 
-  // publish 차단
-  if (data.post_status === 'publish') {
-    errors.push(
-      '차단됨: post_status="publish" — 이 스크립트는 draft만 허용합니다.\n' +
-      '  → 발행은 WordPress 관리자 화면에서 사람이 직접 수행해야 합니다.'
-    );
-  }
-
-  // 허용되지 않는 status 값
-  const allowedStatuses = ['draft', 'pending', 'private'];
-  if (data.post_status && !allowedStatuses.includes(data.post_status)) {
-    errors.push(
-      `허용되지 않는 post_status: "${data.post_status}"\n` +
-      `  → 허용값: ${allowedStatuses.join(', ')}`
-    );
-  }
-
   // 권고 사항 (warnings)
   if (!data.post_excerpt || data.post_excerpt.trim() === '') {
     warnings.push('post_excerpt 없음 — 검색 결과 미리보기 품질에 영향');
@@ -574,7 +558,7 @@ function buildBasicAuthHeader(WP_USER, WP_APP_PASS) {
 // ──────────────────────────────────────────────
 // WP REST API 페이로드 빌드
 // ──────────────────────────────────────────────
-function buildPayload(data, { featuredMediaId = null, injectedContentHtml = null, status = 'draft' } = {}) {
+function buildPayload(data, { featuredMediaId = null, injectedContentHtml = null, status = 'publish', scheduledAt = null } = {}) {
   // 콘텐츠: 주입된 HTML > content_html > content_markdown 변환
   let contentHTML;
   if (injectedContentHtml) {
@@ -592,6 +576,12 @@ function buildPayload(data, { featuredMediaId = null, injectedContentHtml = null
     content: contentHTML,
     excerpt: data.post_excerpt || '',
   };
+
+  // 예약 발행: future 상태일 때 date/date_gmt 필드 추가 (WordPress REST API)
+  if (status === 'future' && scheduledAt) {
+    payload.date     = scheduledAt;
+    payload.date_gmt = new Date(scheduledAt).toISOString().replace(/\.\d{3}Z$/, '');
+  }
 
   // 카테고리 / 태그 (ID 배열)
   if (Array.isArray(data.categories) && data.categories.length > 0) {
@@ -816,7 +806,12 @@ async function main() {
     cliArgs.filter(a => a.startsWith('--'))
       .map(a => { const [k, v] = a.slice(2).split('='); return [k, v ?? true]; })
   );
-  const postStatus = ['draft', 'publish'].includes(flagMap.status) ? flagMap.status : 'draft';
+  const postStatus = ['draft', 'publish', 'future'].includes(flagMap.status) ? flagMap.status : 'publish';
+  const scheduleMinutes = parseInt(flagMap['schedule-minutes'] || '0', 10);
+  let scheduledAt = null;
+  if (postStatus === 'future' && scheduleMinutes > 0) {
+    scheduledAt = new Date(Date.now() + scheduleMinutes * 60000).toISOString();
+  }
 
   console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log(` Tripprice — WordPress 발행 (status: ${postStatus})`);
@@ -875,7 +870,7 @@ async function main() {
   console.log(`글 제목: ${data.post_title}`);
   console.log(`slug:    ${data.slug}`);
   console.log(`언어:    ${data.lang}`);
-  console.log(`상태:    ${postStatus}\n`);
+  console.log(`상태:    ${postStatus}${scheduledAt ? ` (예약: ${scheduledAt})` : ''}\n`);
 
   // 5) 대표 이미지 업로드 (featured_media_url → attachment ID)
   // URL이면 원격 다운로드, 로컬 경로면 파일 직접 읽어 업로드
@@ -915,7 +910,7 @@ async function main() {
   console.log(`slug(확정): ${data.slug}`);
 
   // 6) 페이로드 빌드
-  const payload = buildPayload(data, { featuredMediaId, injectedContentHtml, status: postStatus });
+  const payload = buildPayload(data, { featuredMediaId, injectedContentHtml, status: postStatus, scheduledAt });
 
   // Yoast meta 주입 여부 안내
   if (data.yoast_meta?.focus_keyphrase) {
@@ -928,17 +923,37 @@ async function main() {
     console.log('yoast_meta 없음 — Yoast 필드 주입 건너뜀 (mu-plugin 배포 후 재실행 가능)');
   }
 
-  // 7) 발행
+  // 7) 발행 (publish 실패 시 draft 1회 fallback)
   console.log('WordPress REST API 호출 중...');
   let result;
   try {
     result = await publishToWP(payload, env);
-  } catch (err) {
-    console.error(`\n✗  발행 실패\n${err.message}\n`);
-    process.exit(1);
+  } catch (publishErr) {
+    if (postStatus === 'publish') {
+      // publish 실패 → draft로 1회 재시도 (권한 문제 등 대응)
+      console.warn(`  ⚠  publish 실패 — draft fallback 재시도 중...`);
+      const fallbackPayload = { ...payload, status: 'draft' };
+      try {
+        result = await publishToWP(fallbackPayload, env);
+        console.warn(`  ⚠  draft로 저장됨 (publish 실패 fallback)`);
+      } catch (draftErr) {
+        console.error(`\n✗  발행 실패 (publish + draft fallback 모두 실패)\n${draftErr.message}\n`);
+        process.exit(1);
+      }
+    } else {
+      console.error(`\n✗  발행 실패\n${publishErr.message}\n`);
+      process.exit(1);
+    }
   }
 
-  // 7) 결과 저장
+  // 권한 부족 경고: publish 요청했는데 WP가 draft로 저장한 경우 (비밀값 미출력)
+  if (postStatus === 'publish' && result.status === 'draft') {
+    console.warn(`  ⚠  [권한 경고] publish 요청 → WP 응답 status=draft`);
+    console.warn(`     원인: 사용자 역할이 Contributor 이하이거나 직접 발행 권한이 없을 수 있습니다.`);
+    console.warn(`     확인: WordPress 관리자 > 사용자 > 역할 (Author/Editor/Administrator 필요).`);
+  }
+
+  // 결과 저장
   const { outPath, record } = saveResult(data.slug, result, inputPath);
 
   // 8) 성공 출력

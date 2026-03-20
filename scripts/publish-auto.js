@@ -167,9 +167,13 @@ function runPatch(draftFile) {
 }
 
 // ── wp-publish.js 실행 ────────────────────────────────────────────────────────
-function runWpPublish(draftFile) {
+function runWpPublish(draftFile, publishMode, scheduleMinutes) {
   const publishScript = path.join(__dirname, 'wp-publish.js');
-  const result = spawnSync(process.execPath, [publishScript, draftFile], {
+  const extraArgs = [`--status=${publishMode || 'publish'}`];
+  if (publishMode === 'future' && scheduleMinutes > 0) {
+    extraArgs.push(`--schedule-minutes=${scheduleMinutes}`);
+  }
+  const result = spawnSync(process.execPath, [publishScript, draftFile, ...extraArgs], {
     encoding: 'utf8',
     env: process.env,
     cwd: ROOT,
@@ -180,6 +184,13 @@ function runWpPublish(draftFile) {
     stderr: result.stderr || '',
     status: result.status,
   };
+}
+
+// ── WP_RESULT_JSON 파싱 (wp-publish.js stdout에서 실제 WP status 추출) ──────
+function parseWpResult(stdout) {
+  const m = String(stdout || '').match(/WP_RESULT_JSON:\s*(\{[^\n]+\})/);
+  if (!m) return null;
+  try { return JSON.parse(m[1]); } catch { return null; }
 }
 
 // ── 파일 이동 ─────────────────────────────────────────────────────────────────
@@ -260,13 +271,15 @@ function savePublishLog(records) {
 
 // ── 메인 ─────────────────────────────────────────────────────────────────────
 function main() {
-  const args       = parseArgs();
-  const dryRun     = !!args['dry-run'];
-  const noMove     = !!args['no-move'];   // QA + 보강 실행, 파일 이동만 비활성화
-  const publish    = !!args['publish'];
-  const wpOk       = hasWpEnv();
-  const maxPublish = parseInt(args['max-publish'] || '3', 10);
-  const blocked    = getBlockedHotelIds();
+  const args            = parseArgs();
+  const dryRun          = !!args['dry-run'];
+  const noMove          = !!args['no-move'];   // QA + 보강 실행, 파일 이동만 비활성화
+  const publish         = !!args['publish'];
+  const wpOk            = hasWpEnv();
+  const maxPublish      = parseInt(args['max-publish'] || '3', 10);
+  const publishMode     = args['publish-mode'] || 'publish';  // publish|draft|future
+  const scheduleMinutes = parseInt(args['schedule-minutes'] || '0', 10);
+  const blocked         = getBlockedHotelIds();
 
   console.log('\n══════════════════════════════════════════════');
   console.log('  publish-auto — 자동 QA → 발행');
@@ -287,7 +300,7 @@ function main() {
 
   console.log(`  대상 파일: ${files.length}개\n`);
 
-  const summary = { total: files.length, qaPass: 0, qaFail: 0, queued: 0, published: 0, skipped: 0, errors: 0, patched: 0, repass: 0, patchSkipped: 0, limitReached: 0, blockedQuarantined: 0 };
+  const summary = { total: files.length, qaPass: 0, qaFail: 0, queued: 0, published: 0, wpDraftSaved: 0, skipped: 0, errors: 0, patched: 0, repass: 0, patchSkipped: 0, limitReached: 0, blockedQuarantined: 0 };
   const failReasons = {};  // QA 실패 원인 유형별 집계
   const logRecords  = [];  // 발행 로그 (logs/publish-auto-DATE.json에 저장)
   const trackReasons = (errors) => errors.forEach(e => {
@@ -440,9 +453,9 @@ function main() {
     }
 
     // ── wp-publish 실행 (publish_attempts 추적 + featured-media 오류 시 1회 재시도) ──
-    console.log(`  → wp-publish.js 실행 중... (${summary.published + 1}/${maxPublish})`);
+    console.log(`  → wp-publish.js 실행 중... [status=${publishMode}] (${summary.published + 1}/${maxPublish})`);
     const attempts0 = incrementPublishAttempts(draftFile);
-    let pub = runWpPublish(draftFile);
+    let pub = runWpPublish(draftFile, publishMode, scheduleMinutes);
 
     // featured-media 관련 오류이면 이미지 확보 → patch → 1회 재시도
     if (!pub.ok && isFeaturedMediaError(pub.stderr + pub.stdout)) {
@@ -450,7 +463,7 @@ function main() {
       runResolveImages(draftFile);
       runPatch(draftFile);
       const attempts1 = incrementPublishAttempts(draftFile);
-      pub = runWpPublish(draftFile);
+      pub = runWpPublish(draftFile, publishMode, scheduleMinutes);
       if (!pub.ok) {
         console.log(`  ❌ 재시도 실패 (publish_attempts=${attempts1})`);
       } else {
@@ -459,10 +472,25 @@ function main() {
     }
 
     if (pub.ok) {
-      summary.published++;
-      const dest = moveFile(draftFile, PUBLISHED_DIR);
-      console.log(`  ✅ 발행 성공 → ${path.relative(ROOT, dest)}`);
-      logRecords.push({ draftFile: path.basename(draftFile), patched: wasPatched, seoScore: qa.seoScore, published: true, wpSummary: pub.stdout.slice(0, 200).trim() || null, savedAt: new Date().toISOString() });
+      // WP 응답에서 실제 status 확인 (publish/future vs draft)
+      const wpResult   = parseWpResult(pub.stdout);
+      const wpStatus   = wpResult?.status || publishMode;
+      const isReallyPublished = wpStatus === 'publish' || wpStatus === 'future';
+
+      if (isReallyPublished) {
+        summary.published++;
+        const dest = moveFile(draftFile, PUBLISHED_DIR);
+        console.log(`  ✅ 발행 성공 (WP status=${wpStatus}) → ${path.relative(ROOT, dest)}`);
+        logRecords.push({ draftFile: path.basename(draftFile), patched: wasPatched, seoScore: qa.seoScore, published: true, wpStatus, wpSummary: pub.stdout.slice(0, 200).trim() || null, savedAt: new Date().toISOString() });
+      } else {
+        // WP가 draft로 저장 — 권한 문제 가능성 (비밀값 미출력)
+        summary.wpDraftSaved++;
+        const dest = moveFile(draftFile, PUBLISHED_DIR);
+        console.log(`  ⚠  WP draft 저장됨 (publish 요청 → WP status=draft) → ${path.relative(ROOT, dest)}`);
+        console.log(`     [권한 경고] 사용자 역할 Contributor 이하이거나 직접 발행 권한 없음 가능성.`);
+        console.log(`     확인: WordPress 관리자 > 사용자 > 역할 (Author/Editor/Administrator 필요).`);
+        logRecords.push({ draftFile: path.basename(draftFile), patched: wasPatched, seoScore: qa.seoScore, published: false, wpStatus, wpDraftSaved: true, permissionWarning: true, savedAt: new Date().toISOString() });
+      }
     } else {
       summary.errors++;
       // publish_attempts >= 3 이면 quarantine으로 이동
@@ -501,7 +529,10 @@ function main() {
     if (noMove) {
       console.log(`    NO-MOVE: queued ${summary.queued}건 (파일 이동 없음)`);
     } else if (publish) {
-      console.log(`    발행 성공: ${summary.published} | WP 스킵: ${summary.skipped} | 발행 오류: ${summary.errors}`);
+      console.log(`    발행 성공(publish/future): ${summary.published} | WP draft 저장: ${summary.wpDraftSaved} | WP 스킵: ${summary.skipped} | 발행 오류: ${summary.errors}`);
+      if (summary.wpDraftSaved > 0) {
+        console.log(`    ⚠  WP draft 저장 ${summary.wpDraftSaved}건 — publish 권한 부족 가능성. WP 관리자에서 직접 게시 필요.`);
+      }
       if (summary.limitReached > 0) console.log(`    한도 초과 queued: ${summary.limitReached}건 (max-publish=${maxPublish})`);
     } else {
       console.log(`    발행 준비됨(queued): ${summary.queued} (발행하려면 --publish 추가)`);
