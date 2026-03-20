@@ -35,6 +35,7 @@ const PUBLISHED_DIR  = path.join(ROOT, 'wordpress', 'published');
 const FAILED_DIR     = path.join(ROOT, 'wordpress', 'failed');
 const QUARANTINE_DIR = path.join(ROOT, 'wordpress', 'quarantine');
 const LOGS_DIR       = path.join(ROOT, 'logs');
+const CAMPAIGNS_DIR  = path.join(ROOT, 'state', 'campaigns');
 
 // ── .env.local 자동 로드 (process.env에 이미 있는 키는 덮어쓰지 않음) ─────────
 // 민감정보 값은 절대 로그에 출력하지 않음
@@ -62,6 +63,45 @@ const LOGS_DIR       = path.join(ROOT, 'logs');
     } catch { /* 파일 없으면 다음 시도 */ }
   }
 }());
+
+// ── "발행 불가" hotel_id 목록 (state/campaigns/ 기반) ─────────────────────────
+function getBlockedHotelIds() {
+  const blocked = new Set();
+  if (!fs.existsSync(CAMPAIGNS_DIR)) return blocked;
+  const files = fs.readdirSync(CAMPAIGNS_DIR).filter(f => f.endsWith('.json'));
+  for (const f of files) {
+    try {
+      const raw = fs.readFileSync(path.join(CAMPAIGNS_DIR, f), 'utf8');
+      if (!raw.includes('현재 발행 불가')) continue;
+      const j = JSON.parse(raw);
+      if (j.hotel_id) blocked.add(j.hotel_id);
+    } catch { /* skip */ }
+  }
+  return blocked;
+}
+
+// ── draft에서 hotel_id 추출 ────────────────────────────────────────────────────
+function extractHotelId(draftFile) {
+  try {
+    const d = JSON.parse(fs.readFileSync(draftFile, 'utf8'));
+    return String(d.hotel_id || d.slug || '').trim();
+  } catch { return ''; }
+}
+
+// ── resolveHotelImages 실행 (이미지 사전 확보, 실패해도 계속) ──────────────────
+function runResolveImages(draftFile) {
+  const hotelId = extractHotelId(draftFile);
+  if (!hotelId) return;
+  const resolveScript = path.join(__dirname, 'resolveHotelImages.js');
+  if (!fs.existsSync(resolveScript)) return;
+  const r = spawnSync(process.execPath,
+    [resolveScript, `--hotel-id=${hotelId}`, `--draft=${draftFile}`],
+    { encoding: 'utf8', env: process.env, cwd: ROOT, timeout: 35000 });
+  if (r.stdout) process.stdout.write(r.stdout);
+  if (r.stderr && r.status !== 0) {
+    console.warn(`  ⚠  resolveHotelImages 오류 (계속): ${r.stderr.slice(0, 120)}`);
+  }
+}
 
 // ── CLI 파싱 ──────────────────────────────────────────────────────────────────
 function parseArgs() {
@@ -226,6 +266,7 @@ function main() {
   const publish    = !!args['publish'];
   const wpOk       = hasWpEnv();
   const maxPublish = parseInt(args['max-publish'] || '3', 10);
+  const blocked    = getBlockedHotelIds();
 
   console.log('\n══════════════════════════════════════════════');
   console.log('  publish-auto — 자동 QA → 발행');
@@ -246,7 +287,7 @@ function main() {
 
   console.log(`  대상 파일: ${files.length}개\n`);
 
-  const summary = { total: files.length, qaPass: 0, qaFail: 0, queued: 0, published: 0, skipped: 0, errors: 0, patched: 0, repass: 0, patchSkipped: 0, limitReached: 0 };
+  const summary = { total: files.length, qaPass: 0, qaFail: 0, queued: 0, published: 0, skipped: 0, errors: 0, patched: 0, repass: 0, patchSkipped: 0, limitReached: 0, blockedQuarantined: 0 };
   const failReasons = {};  // QA 실패 원인 유형별 집계
   const logRecords  = [];  // 발행 로그 (logs/publish-auto-DATE.json에 저장)
   const trackReasons = (errors) => errors.forEach(e => {
@@ -259,6 +300,21 @@ function main() {
     let wasPatched = false;
     console.log(`────────────────────────────────────────────`);
     console.log(`  📄 ${path.basename(draftFile)}`);
+
+    // ── blocked 호텔 2중 방어: 발행 단계에서도 차단 ──────────────────────────
+    const hotelIdForBlock = extractHotelId(draftFile);
+    if (hotelIdForBlock && blocked.has(hotelIdForBlock)) {
+      summary.blockedQuarantined++;
+      if (!dryRun && !noMove) {
+        const qDest = quarantineDraft(draftFile, 'blocked_hotel');
+        console.log(`  🚫 blocked 호텔 → 격리(quarantine): ${path.relative(ROOT, qDest)}`);
+        logRecords.push({ draftFile: path.basename(draftFile), event: 'blocked_quarantine', hotelId: hotelIdForBlock, quarantined: true, quarantine_reason: 'blocked_hotel', quarantine_at: new Date().toISOString(), savedAt: new Date().toISOString() });
+      } else {
+        console.log(`  ⛔ blocked 호텔 — 건너뜀 (${dryRun ? 'dry-run' : 'no-move'})`);
+      }
+      console.log('');
+      continue;
+    }
 
     // ── QA 실행 ────────────────────────────────────────────────────────────
     const qa = runQA(rel);
@@ -388,9 +444,10 @@ function main() {
     const attempts0 = incrementPublishAttempts(draftFile);
     let pub = runWpPublish(draftFile);
 
-    // featured-media 관련 오류이면 patch 후 1회 재시도
+    // featured-media 관련 오류이면 이미지 확보 → patch → 1회 재시도
     if (!pub.ok && isFeaturedMediaError(pub.stderr + pub.stdout)) {
-      console.log(`  ⚠  featured-media 오류 감지 — patch-draft-minimums 후 재시도...`);
+      console.log(`  ⚠  featured-media 오류 감지 — 이미지 확보 → patch → 재시도...`);
+      runResolveImages(draftFile);
       runPatch(draftFile);
       const attempts1 = incrementPublishAttempts(draftFile);
       pub = runWpPublish(draftFile);
@@ -411,7 +468,7 @@ function main() {
       // publish_attempts >= 3 이면 quarantine으로 이동
       const finalAttempts = getPublishAttempts(draftFile);
       if (finalAttempts >= 3) {
-        const quarantineReason = `publish_attempts=${finalAttempts}: ${(pub.stderr || '').slice(0, 200).trim()}`;
+        const quarantineReason = 'publish_failed';
         const qDest = quarantineDraft(draftFile, quarantineReason);
         console.log(`  🚫 격리(quarantine) 이동 (publish_attempts=${finalAttempts}) → ${path.relative(ROOT, qDest)}`);
         logRecords.push({ draftFile: path.basename(draftFile), patched: wasPatched, seoScore: qa.seoScore, published: false, quarantined: true, publish_attempts: finalAttempts, quarantine_reason: quarantineReason.slice(0, 300), savedAt: new Date().toISOString() });
@@ -431,6 +488,9 @@ function main() {
   console.log(`  완료: 총 ${summary.total}개`);
   console.log(`    QA 통과: ${summary.qaPass} | QA 실패: ${summary.qaFail}`);
   if (!dryRun) {
+    if (summary.blockedQuarantined > 0) {
+      console.log(`    blocked 격리: ${summary.blockedQuarantined}건 (quarantine_reason=blocked_hotel)`);
+    }
     if (summary.patched > 0 || summary.patchSkipped > 0) {
       console.log(`    자동 보강: ${summary.patched}건 시도 | 보강 후 PASS: ${summary.repass}건 | 한도초과 스킵: ${summary.patchSkipped}건`);
     }

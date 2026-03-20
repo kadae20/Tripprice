@@ -25,10 +25,8 @@ node scripts/ingest-hotel-data.js
 WordPress REST API 기반 Draft 발행. publish 상태 차단.
 
 ```bash
-WP_URL=https://tripprice.net \
-WP_USER=admin \
-WP_APP_PASS="xxxx xxxx xxxx xxxx" \
-  node scripts/wp-publish.js wordpress/sample-post.json
+# WP 인증정보는 .env.local에서 자동 로드 (cp .env.example .env.local 후 값 입력)
+node scripts/wp-publish.js wordpress/sample-post.json
 ```
 
 출력: `state/campaigns/[slug]-published.json`
@@ -87,6 +85,91 @@ node scripts/enrich-missing-data.js --all
 ```
 
 출력: `state/campaigns/enrichment-report-[date].md`, `state/campaigns/enrichment-plan-[hotel_id].json`
+
+---
+
+### editorial-chief.js ⭐ 실전 편집국 OS (핵심)
+
+"선정 → 보강 → QA → 발행 → 로그" 전체 파이프라인을 단일 커맨드로 실행하는 지휘관 스크립트.
+
+```bash
+# ── 기본 (QA까지, 발행 안 함) ─────────────────────────────────────────
+node scripts/editorial-chief.js --auto --since=$(date +%Y-%m-%d)
+
+# ── 실전 발행 (.env.local에 WP 인증정보 설정 후) ─────────────────────
+# WP_URL / WP_USER / WP_APP_PASS 는 .env.local 에서 자동 로드됩니다
+node scripts/editorial-chief.js --auto --since=$(date +%Y-%m-%d) --publish --max-publish=5
+
+# ── DRY-RUN (파일 조작 전혀 없이 결과만 확인) ─────────────────────────
+node scripts/editorial-chief.js --auto --since=$(date +%Y-%m-%d) --dry-run
+
+# ── NO-MOVE (QA/보강 실행, 파일 이동 없음 — 운영 안전 모드) ───────────
+node scripts/editorial-chief.js --auto --since=$(date +%Y-%m-%d) --no-move
+
+# ── 특정 파일만 처리 ─────────────────────────────────────────────────
+node scripts/editorial-chief.js --auto --since=$(date +%Y-%m-%d) --match=ibis
+
+# ── 락 충돌 시 강제 실행 ─────────────────────────────────────────────
+node scripts/editorial-chief.js --auto --since=$(date +%Y-%m-%d) --force
+
+# ── npm scripts 축약 ─────────────────────────────────────────────────
+npm run editorial:chief  # QA까지 (기본)
+npm run editorial:run    # WP 발행 포함 (env 설정 후)
+```
+
+**주요 옵션:**
+
+| 옵션 | 기본값 | 설명 |
+|------|-------|------|
+| `--auto` | (필수) | 자동 선정 (drafts→campaigns→processed) |
+| `--since=YYYY-MM-DD` | 오늘 | 이 날짜 이후 수정 파일만 처리 |
+| `--publish` | false | WP REST API 발행 활성화 |
+| `--max-publish=N` | 5 | 하루 최대 발행 수 |
+| `--no-move` | false | 파일 이동 없이 QA/보강 시뮬레이션 |
+| `--dry-run` | false | 파일 조작 전혀 없음 |
+| `--force` | false | 락 무시하고 실행 |
+| `--sleep-ms=N` | 1500 | 발행 간 딜레이 (ms) |
+| `--retry-wp=N` | 3 | WP 발행 재시도 횟수 |
+| `--retry-delay-ms=N` | 2000 | 재시도 초기 대기 (지수 증가) |
+| `--lang=ko\|en\|ja` | ko | 언어 (pipeline 연동용) |
+| `--match=keyword` | - | 파일명 키워드 필터 |
+
+**안전장치:**
+- 락 파일: `/tmp/tripprice-editorial.lock` (PID 생존 확인 + 2h 스테일 자동 해제)
+- 발행 한도: `MAX_DAILY_PROCESS=50` (폭주 방지) + `--max-publish`
+- 격리: patch 2회 초과 QA 실패 또는 WP 발행 전회 실패 → `wordpress/quarantine/`
+- 멱등성: `workflow_state.published_wp_id` 있으면 재발행 방지
+- WP env 없음: 전체 런 계속 (failed 아닌 skipped 처리)
+
+**크론 예시:**
+```bash
+# 매일 오전 9시 자동 발행 (최대 5편)
+# WP 인증정보는 /home/ubuntu/tripprice/.env.local 에서 자동 로드됨
+# ※ cron에서 % 문자 오작동 방지: /bin/date +\%Y-\%m-\%d 형식 + SINCE 변수 사용
+0 9 * * * cd /home/ubuntu/tripprice && SINCE=$(/bin/date +\%Y-\%m-\%d) && node scripts/editorial-chief.js --auto --since=$SINCE --publish --max-publish=5 >> logs/cron-editorial.log 2>&1
+
+# 매주 월요일 오전 8시: 지난 7일 draft 대량 처리
+0 8 * * 1 cd /home/ubuntu/tripprice && SINCE=$(/bin/date -d '7 days ago' +\%Y-\%m-\%d) && node scripts/editorial-chief.js --auto --since=$SINCE --no-move >> logs/cron-editorial-weekly.log 2>&1
+```
+
+**로그 위치:**
+- 런 단위 요약: `logs/editorial-chief-YYYY-MM-DD.json`
+- 글별 발행 기록: `logs/publish-auto-YYYY-MM-DD.json`
+- 크론 실행 로그: `logs/cron-editorial.log` (직접 지정 시)
+
+**워크플로우:**
+```
+desk-assign (선정)
+  → desk-writing (H3/FAQ/체크리스트 보강)
+  → desk-seo (meta/내부링크/schema)
+  → desk-image (featured + 이미지 5장)
+  → QA (hard gates)
+  → [FAIL] auto-patch → 재QA
+    → [FAIL again] → wordpress/quarantine/
+  → [PASS] WP 발행 (--publish 시)
+    → [실패] 재시도 3회 → wordpress/quarantine/
+    → [성공] wordpress/published/ 이동
+```
 
 ---
 
@@ -308,20 +391,62 @@ node scripts/publish-auto.js
 
 ---
 
+## EC2 실전 운영 검증 커맨드 8개
+
+```bash
+# 0) 최신 반영
+cd /home/ubuntu/tripprice && git pull origin main
+
+# 1) env 자동 로드 확인 (값 출력 없이 boolean으로만 확인)
+unset WP_URL WP_USER WP_APP_PASS
+node -e "require('./scripts/wp-publish.js'); const e=process.env; console.log('ENV', !!e.WP_URL, !!e.WP_USER, !!e.WP_APP_PASS)"
+
+# 2) blocked 제외가 draft 후보 선정에서 동작하는지 (dry-run)
+node scripts/editorial-os.js --auto --dry-run --since=$(date +%Y-%m-%d) | grep -E "blocked로 제외|거부" || echo "(blocked 호텔 없음 — 정상)"
+
+# 3) resolveHotelImages 단독 테스트 (호텔 1개, 이미지 6장 목표)
+node scripts/resolveHotelImages.js --hotel-id=ibis-myeongdong
+ls -la assets/processed/ibis-myeongdong/ | head
+
+# 4) AGODA_API_KEY 있을 때 추가 소스 테스트 (키 값은 로그에 출력 금지 — boolean만 확인)
+node -e "console.log('AGODA_API_KEY set:', !!process.env.AGODA_API_KEY)"
+# AGODA_API_KEY가 설정돼 있으면:
+node scripts/resolveHotelImages.js --hotel-id=ibis-myeongdong
+
+# 5) patch에서 step-0 이미지 확보 실행 여부 확인 (일반 실행 — dry-run 아님)
+node scripts/patch-draft-minimums.js wordpress/drafts/post-$(ls wordpress/drafts/post-*.json 2>/dev/null | head -1 | xargs basename) 2>&1 | head -30
+# → "🔍 [hotel-id] 이미지 … 확보 시도" 라인이 보여야 함
+
+# 6) publish-auto 실제 발행 테스트 (소량)
+node scripts/publish-auto.js --since=$(date +%Y-%m-%d) --publish --max-publish=3
+
+# 7) placeholder 비율 확인 (줄어들어야 함)
+grep -rl "assets/placeholder/featured.webp" wordpress/published/ 2>/dev/null | wc -l
+
+# 8) quarantine 확인 (blocked_hotel / publish_failed 구분)
+ls -la wordpress/quarantine/ 2>/dev/null | head
+grep -h "quarantine_reason" wordpress/quarantine/*.json 2>/dev/null | sort | uniq -c | sort -rn || echo "(quarantine 없음)"
+```
+
+---
+
 ## 공통 규칙
 
 - API 키는 환경변수로만 전달. 파일·로그 저장 금지.
 - 실행 결과는 `state/` 폴더에 저장.
 - 실제 처리 전 `--dry-run` 옵션으로 먼저 확인 권장.
 
-## 환경변수
+## 환경변수 설정
 
 ```bash
-WP_URL=https://tripprice.net
-WP_USER=your_username
-WP_APP_PASS="xxxx xxxx xxxx xxxx"   # WP Application Password
-AGODA_API_KEY=...
-GOOGLE_SC_CREDENTIALS=path/to/service-account.json
+# 1) 템플릿 복사
+cp .env.example .env.local
+
+# 2) .env.local 편집 (값 입력)
+#    WP_URL, WP_USER, WP_APP_PASS, AGODA_API_KEY 등
 ```
 
-> `.env` 파일은 절대 git에 커밋하지 마세요. `.gitignore`에 추가하세요.
+editorial-chief.js / wp-publish.js는 실행 시 `.env.local` → `.env` 순으로
+자동 로드합니다. 커맨드 라인에 인증정보를 노출할 필요가 없습니다.
+
+> ⚠️ `.env.local` / `.env` 는 절대 git에 커밋하지 마세요. `.gitignore`에 포함되어 있습니다.

@@ -78,11 +78,22 @@ function getBlockedHotelIds() {
   return blocked;
 }
 
+// ── 파일명에서 slug 추출 (blocked 필터 fallback용) ────────────────────────────
+// post-<slug>-review-YYYY-MM-DD.json → <slug>
+function extractSlugFromFilename(f) {
+  return f
+    .replace(/^post-/, '')
+    .replace(/-review-\d{4}-\d{2}-\d{2}\.json$/, '')
+    .replace(/\.json$/, '');
+}
+
 // ── --auto: wordpress/drafts/ 의 오늘 post-*.json 선별 ───────────────────────
-function selectFromDrafts(sinceDate) {
-  if (!fs.existsSync(DRAFTS_DIR)) return [];
+// blocked: Set<hotel_id> — blocked 호텔은 후보에서 제외
+function selectFromDrafts(sinceDate, blocked) {
+  if (!fs.existsSync(DRAFTS_DIR)) return { hotels: [], excludedCount: 0 };
   const since = sinceDate ? new Date(sinceDate).getTime() : Date.now() - 86400000; // 기본: 24h
-  return fs.readdirSync(DRAFTS_DIR)
+  let excludedCount = 0;
+  const hotels = fs.readdirSync(DRAFTS_DIR)
     .filter(f => f.startsWith('post-') && f.endsWith('.json') && !f.endsWith('.qa.json'))
     .filter(f => {
       try { return fs.statSync(path.join(DRAFTS_DIR, f)).mtimeMs >= since; } catch { return false; }
@@ -90,10 +101,13 @@ function selectFromDrafts(sinceDate) {
     .map(f => {
       try {
         const j = JSON.parse(fs.readFileSync(path.join(DRAFTS_DIR, f), 'utf8'));
-        return { id: j.slug || f.replace('post-', '').replace('.json', ''), score: j.coverage_score || 0, name: j.post_title || '', draftFile: f };
+        const hotelId = String(j.hotel_id || j.slug || extractSlugFromFilename(f)).trim();
+        if (blocked && blocked.has(hotelId)) { excludedCount++; return null; }
+        return { id: hotelId, score: j.coverage_score || 0, name: j.post_title || '', draftFile: f };
       } catch { return null; }
     })
     .filter(Boolean);
+  return { hotels, excludedCount };
 }
 
 // ── --auto: state/campaigns/ 에서 grade A/B 호텔 추출 ─────────────────────────
@@ -206,7 +220,8 @@ function main() {
   } else if (args.auto) {
     // --auto: (a) 오늘 drafts 우선 → (b) campaigns grade A/B → (c) processed by score
     const sinceDate = args.since || new Date().toISOString().split('T')[0];
-    const draftsToday = selectFromDrafts(sinceDate);
+    const { hotels: draftsToday, excludedCount: draftsBlockedCount } = selectFromDrafts(sinceDate, blocked);
+    if (draftsBlockedCount > 0) console.log(`  blocked로 제외: ${draftsBlockedCount}개`);
 
     if (draftsToday.length > 0) {
       // 이미 draft가 있음 → pipeline 생략, publish-auto만 실행
