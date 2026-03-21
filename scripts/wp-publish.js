@@ -25,6 +25,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 // ──────────────────────────────────────────────
 // Node 버전 확인 (fetch는 Node 18+)
@@ -341,18 +342,18 @@ function validateInput(data) {
 // featured_media_url이 로컬 경로(http 아님)일 때 호출.
 // 실패 시 null 반환 (경고만, 발행은 계속).
 // ──────────────────────────────────────────────
-async function uploadMediaFromFile(localPath, { WP_URL, authHeader }) {
+async function uploadMediaFromFile(localPath, { WP_URL, authHeader }, altText) {
   const absPath = path.resolve(ROOT, localPath);
-  if (!require('fs').existsSync(absPath)) {
+  if (!fs.existsSync(absPath)) {
     console.warn(`  ⚠  로컬 이미지 없음 (featured_media 건너뜀): ${absPath}`);
     return null;
   }
 
-  const buffer = require('fs').readFileSync(absPath);
-  const ext    = require('path').extname(absPath).toLowerCase();
+  const buffer = fs.readFileSync(absPath);
+  const ext    = path.extname(absPath).toLowerCase();
   const ctMap  = { '.webp': 'image/webp', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png' };
   const contentType = ctMap[ext] || 'image/jpeg';
-  const filename    = require('path').basename(absPath);
+  const filename    = path.basename(absPath);
 
   const endpoint = `${WP_URL}/wp-json/wp/v2/media`;
   let uploadResponse;
@@ -380,6 +381,18 @@ async function uploadMediaFromFile(localPath, { WP_URL, authHeader }) {
 
   const media = await uploadResponse.json();
   console.log(`  ✓  미디어 업로드 완료 — attachment ID: ${media.id} (${filename})`);
+
+  // alt_text 설정 (별도 PATCH — 실패해도 발행 계속)
+  if (altText && media.id) {
+    try {
+      await fetch(`${WP_URL}/wp-json/wp/v2/media/${media.id}`, {
+        method: 'POST',
+        headers: { Authorization: authHeader, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ alt_text: String(altText).slice(0, 100) }),
+      });
+    } catch { /* alt_text 설정 실패 — 무시 */ }
+  }
+
   return media.id;
 }
 
@@ -388,7 +401,7 @@ async function uploadMediaFromFile(localPath, { WP_URL, authHeader }) {
 // featured_media_url을 WP 미디어 라이브러리에 업로드하고
 // attachment ID를 반환. 실패 시 null 반환 (경고만, 발행은 계속).
 // ──────────────────────────────────────────────
-async function uploadMediaFromUrl(imageUrl, { WP_URL, authHeader }) {
+async function uploadMediaFromUrl(imageUrl, { WP_URL, authHeader }, altText) {
   // 1) 이미지 다운로드
   let imgResponse;
   try {
@@ -433,7 +446,38 @@ async function uploadMediaFromUrl(imageUrl, { WP_URL, authHeader }) {
 
   const media = await uploadResponse.json();
   console.log(`  ✓  미디어 업로드 완료 — attachment ID: ${media.id} (${filename})`);
+
+  // alt_text 설정 (별도 PATCH — 실패해도 발행 계속)
+  if (altText && media.id) {
+    try {
+      await fetch(`${WP_URL}/wp-json/wp/v2/media/${media.id}`, {
+        method: 'POST',
+        headers: { Authorization: authHeader, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ alt_text: String(altText).slice(0, 100) }),
+      });
+    } catch { /* alt_text 설정 실패 — 무시 */ }
+  }
+
   return media.id;
+}
+
+// ──────────────────────────────────────────────
+// 이미지 사전 확보 (resolveHotelImages.js 서브프로세스 호출)
+// 실패해도 발행 파이프라인 계속 진행.
+// ──────────────────────────────────────────────
+function resolveImagesForHotel(hotelId, draftPath) {
+  const resolveScript = path.join(__dirname, 'resolveHotelImages.js');
+  if (!hotelId || !fs.existsSync(resolveScript)) return;
+  console.log(`  이미지 사전 확보 중 (hotel: ${hotelId})...`);
+  const r = spawnSync(
+    process.execPath,
+    [resolveScript, `--hotel-id=${hotelId}`, ...(draftPath ? [`--draft=${draftPath}`] : [])],
+    { encoding: 'utf8', env: process.env, cwd: ROOT, timeout: 60000 }
+  );
+  if (r.stdout) process.stdout.write(r.stdout);
+  if (r.stderr && r.status !== 0) {
+    console.warn(`  ⚠  resolveHotelImages 오류 (계속): ${r.stderr.slice(0, 120)}`);
+  }
 }
 
 // ──────────────────────────────────────────────
@@ -677,9 +721,12 @@ async function ensureUniqueWpSlug(slug, env) {
 // - 401 수신 시: 자격증명을 재빌드해 1회 재시도 (만료된 세션 쿠키 등 대응)
 // - 인증 정보(토큰/비밀번호)는 절대 stdout/stderr에 출력하지 않음
 // ──────────────────────────────────────────────
-async function publishToWP(payload, env) {
+async function publishToWP(payload, env, postId) {
   const { WP_URL, WP_USER, WP_APP_PASS } = env;
-  const endpoint = `${WP_URL}/wp-json/wp/v2/posts`;
+  // postId 있으면 기존 글 업데이트(멱등) — slug -2 생성 방지
+  const endpoint = postId
+    ? `${WP_URL}/wp-json/wp/v2/posts/${postId}`
+    : `${WP_URL}/wp-json/wp/v2/posts`;
 
   // Basic Auth 강제: 항상 WP_USER:WP_APP_PASS로 헤더를 새로 빌드
   const authHeader = buildBasicAuthHeader(WP_USER, WP_APP_PASS);
@@ -867,21 +914,51 @@ async function main() {
     process.exit(1);
   }
 
+  // 멱등성: published_wp_id가 있으면 신규 생성 대신 기존 글 업데이트
+  const publishedWpId = (data.workflow_state && data.workflow_state.published_wp_id) || null;
+
   console.log(`글 제목: ${data.post_title}`);
   console.log(`slug:    ${data.slug}`);
   console.log(`언어:    ${data.lang}`);
-  console.log(`상태:    ${postStatus}${scheduledAt ? ` (예약: ${scheduledAt})` : ''}\n`);
+  console.log(`상태:    ${postStatus}${scheduledAt ? ` (예약: ${scheduledAt})` : ''}`);
+  if (publishedWpId) {
+    console.log(`멱등 모드: post_id=${publishedWpId} 업데이트 (slug -2 생성 방지)`);
+  }
+  console.log('');
 
   // 5) 대표 이미지 업로드 (featured_media_url → attachment ID)
-  // URL이면 원격 다운로드, 로컬 경로면 파일 직접 읽어 업로드
+  // 이미지 없는 경우: assets/processed/{hotel_id}/featured.webp 확인 → resolveHotelImages 실행
+  const hotelIdForImg = String(data.hotel_id || data.slug || '').trim();
+  let fmuResolved = data.featured_media_url || '';
+
+  // 로컬 경로인데 파일이 없거나, URL 자체가 없으면 processed/ 폴더 탐색
+  if (!fmuResolved || (!/^https?:\/\//.test(fmuResolved) && !fs.existsSync(path.resolve(ROOT, fmuResolved)))) {
+    if (hotelIdForImg) {
+      const processedFeatured = path.join(ROOT, 'assets', 'processed', hotelIdForImg, 'featured.webp');
+      if (fs.existsSync(processedFeatured)) {
+        fmuResolved = path.relative(ROOT, processedFeatured);
+        console.log(`  대표 이미지: 로컬 processed/ 폴더에서 확보 → ${fmuResolved}`);
+      } else {
+        // resolveHotelImages 실행 후 재확인
+        resolveImagesForHotel(hotelIdForImg, inputPath);
+        if (fs.existsSync(processedFeatured)) {
+          fmuResolved = path.relative(ROOT, processedFeatured);
+          console.log(`  대표 이미지: resolveHotelImages 후 확보 → ${fmuResolved}`);
+        }
+      }
+    }
+  }
+
   let featuredMediaId = null;
-  if (data.featured_media_url) {
-    const fmu = data.featured_media_url;
-    console.log(`대표 이미지 업로드 중: ${fmu}`);
-    if (/^https?:\/\//.test(fmu)) {
-      featuredMediaId = await uploadMediaFromUrl(fmu, env);
+  if (fmuResolved) {
+    const altText = hotelIdForImg
+      ? `${(data.post_title || hotelIdForImg).split(/\s+/).slice(0, 4).join(' ')} 대표 이미지`
+      : '';
+    console.log(`대표 이미지 업로드 중: ${fmuResolved}`);
+    if (/^https?:\/\//.test(fmuResolved)) {
+      featuredMediaId = await uploadMediaFromUrl(fmuResolved, env, altText);
     } else {
-      featuredMediaId = await uploadMediaFromFile(fmu, env);
+      featuredMediaId = await uploadMediaFromFile(fmuResolved, env, altText);
     }
   } else {
     console.log('featured_media_url 없음 — 대표 이미지 업로드 건너뜀');
@@ -927,14 +1004,14 @@ async function main() {
   console.log('WordPress REST API 호출 중...');
   let result;
   try {
-    result = await publishToWP(payload, env);
+    result = await publishToWP(payload, env, publishedWpId);
   } catch (publishErr) {
     if (postStatus === 'publish') {
       // publish 실패 → draft로 1회 재시도 (권한 문제 등 대응)
       console.warn(`  ⚠  publish 실패 — draft fallback 재시도 중...`);
       const fallbackPayload = { ...payload, status: 'draft' };
       try {
-        result = await publishToWP(fallbackPayload, env);
+        result = await publishToWP(fallbackPayload, env, publishedWpId);
         console.warn(`  ⚠  draft로 저장됨 (publish 실패 fallback)`);
       } catch (draftErr) {
         console.error(`\n✗  발행 실패 (publish + draft fallback 모두 실패)\n${draftErr.message}\n`);
@@ -951,6 +1028,21 @@ async function main() {
     console.warn(`  ⚠  [권한 경고] publish 요청 → WP 응답 status=draft`);
     console.warn(`     원인: 사용자 역할이 Contributor 이하이거나 직접 발행 권한이 없을 수 있습니다.`);
     console.warn(`     확인: WordPress 관리자 > 사용자 > 역할 (Author/Editor/Administrator 필요).`);
+  }
+
+  // 발행 성공 후 published_wp_id를 draft JSON에 저장 (멱등성 보장)
+  // 다음 실행에서 새 글 생성이 아닌 기존 글 업데이트로 처리됨
+  if (result && result.id) {
+    try {
+      const currentDraft = JSON.parse(fs.readFileSync(inputPath, 'utf8'));
+      if (!currentDraft.workflow_state) currentDraft.workflow_state = {};
+      currentDraft.workflow_state.published_wp_id = result.id;
+      currentDraft.workflow_state.published_at    = new Date().toISOString();
+      fs.writeFileSync(inputPath, JSON.stringify(currentDraft, null, 2), 'utf8');
+      console.log(`  → published_wp_id=${result.id} draft JSON 저장 완료 (멱등성 보장)`);
+    } catch (e) {
+      console.warn(`  ⚠  published_wp_id 저장 실패: ${e.message}`);
+    }
   }
 
   // 결과 저장
