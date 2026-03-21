@@ -97,6 +97,17 @@ function maskSecret(s) {
   return str.slice(0, -4).replace(/\S/g, '*') + str.slice(-4);
 }
 
+// ── hotel_id 정규화 ────────────────────────────────────────────────────────────
+// slug/hotel_id에 포함된 날짜·리뷰 접미사를 제거해 실제 호텔 폴더명과 일치시킨다.
+// 예: "ibis-ambassador-seoul-myeongdong-review-2026-03-13" → "ibis-ambassador-seoul-myeongdong"
+// 예: "busan-haeundae-illowa-stay-2026-03-19"             → "busan-haeundae-illowa-stay"
+function normalizeHotelId(raw) {
+  return String(raw || '')
+    .replace(/-review-\d{4}-\d{2}-\d{2}$/, '')
+    .replace(/-\d{4}-\d{2}-\d{2}$/, '')
+    .trim();
+}
+
 // ──────────────────────────────────────────────
 // 환경변수 로드 및 검증
 // ──────────────────────────────────────────────
@@ -816,7 +827,7 @@ async function publishToWP(payload, env, postId) {
 // ──────────────────────────────────────────────
 // 결과 저장
 // ──────────────────────────────────────────────
-function saveResult(slug, result, inputPath) {
+function saveResult(slug, result, inputPath, wpUrl) {
   if (!fs.existsSync(DIR_CAMPAIGNS)) {
     fs.mkdirSync(DIR_CAMPAIGNS, { recursive: true });
   }
@@ -827,9 +838,9 @@ function saveResult(slug, result, inputPath) {
     status: result.status,
     title: result.title?.rendered || '',
     edit_url: `${result.link}`.replace(/\/$/, '') || '',
-    wp_admin_url: result.guid?.rendered
-      ? result.guid.rendered.replace(/\?p=/, 'wp-admin/post.php?post=') + '&action=edit'
-      : '',
+    wp_admin_url: wpUrl
+      ? `${wpUrl}/wp-admin/post.php?post=${result.id}&action=edit`
+      : `wp-admin/post.php?post=${result.id}&action=edit`,
     published_at: new Date().toISOString(),
     source_file: path.relative(ROOT, inputPath),
   };
@@ -928,7 +939,7 @@ async function main() {
 
   // 5) 대표 이미지 업로드 (featured_media_url → attachment ID)
   // 이미지 없는 경우: assets/processed/{hotel_id}/featured.webp 확인 → resolveHotelImages 실행
-  const hotelIdForImg = String(data.hotel_id || data.slug || '').trim();
+  const hotelIdForImg = normalizeHotelId(data.hotel_id || data.slug || '');
   let fmuResolved = data.featured_media_url || '';
 
   // 로컬 경로인데 파일이 없거나, URL 자체가 없으면 processed/ 폴더 탐색
@@ -1046,7 +1057,7 @@ async function main() {
   }
 
   // 결과 저장
-  const { outPath, record } = saveResult(data.slug, result, inputPath);
+  const { outPath, record } = saveResult(data.slug, result, inputPath, env.WP_URL);
 
   // 8) 성공 출력
   // machine-readable 한 줄 — editorial-chief.js가 post_id 파싱에 사용

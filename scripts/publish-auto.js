@@ -64,6 +64,15 @@ const CAMPAIGNS_DIR  = path.join(ROOT, 'state', 'campaigns');
   }
 }());
 
+// ── hotel_id 정규화 (날짜/리뷰 접미사 제거) ───────────────────────────────────
+// 예: "ibis-myeongdong-review-2026-03-13" → "ibis-myeongdong"
+function normalizeHotelId(raw) {
+  return String(raw || '')
+    .replace(/-review-\d{4}-\d{2}-\d{2}$/, '')
+    .replace(/-\d{4}-\d{2}-\d{2}$/, '')
+    .trim();
+}
+
 // ── "발행 불가" hotel_id 목록 (state/campaigns/ 기반) ─────────────────────────
 function getBlockedHotelIds() {
   const blocked = new Set();
@@ -81,10 +90,11 @@ function getBlockedHotelIds() {
 }
 
 // ── draft에서 hotel_id 추출 ────────────────────────────────────────────────────
+// hotel_id 필드 우선, 없으면 slug에서 날짜 접미사를 제거해 사용
 function extractHotelId(draftFile) {
   try {
     const d = JSON.parse(fs.readFileSync(draftFile, 'utf8'));
-    return String(d.hotel_id || d.slug || '').trim();
+    return normalizeHotelId(d.hotel_id || d.slug || '');
   } catch { return ''; }
 }
 
