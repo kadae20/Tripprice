@@ -613,7 +613,7 @@ function buildBasicAuthHeader(WP_USER, WP_APP_PASS) {
 // ──────────────────────────────────────────────
 // WP REST API 페이로드 빌드
 // ──────────────────────────────────────────────
-function buildPayload(data, { featuredMediaId = null, injectedContentHtml = null, status = 'publish', scheduledAt = null } = {}) {
+function buildPayload(data, { featuredMediaId = null, injectedContentHtml = null, status = 'publish', scheduledAt = null, wpSlug = null } = {}) {
   // 콘텐츠: 주입된 HTML > content_html > content_markdown 변환
   let contentHTML;
   if (injectedContentHtml) {
@@ -626,7 +626,7 @@ function buildPayload(data, { featuredMediaId = null, injectedContentHtml = null
 
   const payload = {
     title:   data.post_title,
-    slug:    data.slug,
+    slug:    wpSlug || data.slug,  // update 모드: stored wp_slug 우선 (slug -2/-3/-4 증식 방지)
     status,
     content: contentHTML,
     excerpt: data.post_excerpt || '',
@@ -851,6 +851,30 @@ function saveResult(slug, result, inputPath, wpUrl) {
 }
 
 // ──────────────────────────────────────────────
+// workflow_state write-back 헬퍼
+// 발행 성공/draft fallback 후 draft JSON에 상태 기록 (멱등성 보장)
+// A3: published_wp_id + wp_slug + wp_status + published_at + last_publish_attempt + publish_attempts
+// ──────────────────────────────────────────────
+function writeBackWorkflowState(inputPath, data, result) {
+  try {
+    const cur = JSON.parse(fs.readFileSync(inputPath, 'utf8'));
+    if (!cur.workflow_state) cur.workflow_state = {};
+    cur.workflow_state.published_wp_id      = result.id;
+    cur.workflow_state.wp_slug              = result.slug;
+    cur.workflow_state.wp_status            = result.status;
+    cur.workflow_state.published_at         = new Date().toISOString();
+    cur.workflow_state.last_publish_attempt = new Date().toISOString();
+    cur.workflow_state.publish_attempts     = (cur.workflow_state.publish_attempts || 0) + 1;
+    fs.writeFileSync(inputPath, JSON.stringify(cur, null, 2), 'utf8');
+    // data 객체도 동기화 (이후 코드에서 참조 가능하게)
+    Object.assign(data.workflow_state || (data.workflow_state = {}), cur.workflow_state);
+    console.log(`  → published_wp_id=${result.id} wp_slug=${result.slug} draft JSON 저장 완료 (멱등성 보장)`);
+  } catch (e) {
+    console.warn(`  ⚠  workflow_state 저장 실패: ${e.message}`);
+  }
+}
+
+// ──────────────────────────────────────────────
 // 메인
 // ──────────────────────────────────────────────
 async function main() {
@@ -926,7 +950,27 @@ async function main() {
   }
 
   // 멱등성: published_wp_id가 있으면 신규 생성 대신 기존 글 업데이트
-  const publishedWpId = (data.workflow_state && data.workflow_state.published_wp_id) || null;
+  let publishedWpId = (data.workflow_state && data.workflow_state.published_wp_id) || null;
+
+  // A2: workflow_state에 없으면 state/campaigns/{slug}-published.json 에서 복구
+  if (!publishedWpId) {
+    const campaignFile = path.join(DIR_CAMPAIGNS, `${data.slug}-published.json`);
+    if (fs.existsSync(campaignFile)) {
+      try {
+        const camp = JSON.parse(fs.readFileSync(campaignFile, 'utf8'));
+        if (camp.post_id) {
+          publishedWpId = camp.post_id;
+          if (!data.workflow_state) data.workflow_state = {};
+          data.workflow_state.published_wp_id = camp.post_id;
+          if (camp.slug) data.workflow_state.wp_slug = camp.slug;
+          fs.writeFileSync(inputPath, JSON.stringify(data, null, 2), 'utf8');
+          console.log(`  → campaigns 파일에서 post_id=${camp.post_id} 복구 → draft workflow_state 동기화 완료`);
+        }
+      } catch (e) {
+        console.warn(`  ⚠  campaigns 파일 복구 실패: ${e.message}`);
+      }
+    }
+  }
 
   console.log(`글 제목: ${data.post_title}`);
   console.log(`slug:    ${data.slug}`);
@@ -960,6 +1004,15 @@ async function main() {
     }
   }
 
+  // step 4: placeholder fallback
+  if (!fmuResolved) {
+    const placeholderPath = path.join(ROOT, 'assets', 'placeholder', 'featured.webp');
+    if (fs.existsSync(placeholderPath)) {
+      fmuResolved = path.relative(ROOT, placeholderPath);
+      console.log(`  대표 이미지: placeholder 사용 → ${fmuResolved}`);
+    }
+  }
+
   let featuredMediaId = null;
   if (fmuResolved) {
     const altText = hotelIdForImg
@@ -972,7 +1025,23 @@ async function main() {
       featuredMediaId = await uploadMediaFromFile(fmuResolved, env, altText);
     }
   } else {
-    console.log('featured_media_url 없음 — 대표 이미지 업로드 건너뜀');
+    // 이미지를 끝내 확보 못한 경우: 텍스트 단독 publish 금지
+    console.error('  ✗ 대표 이미지 없음 (placeholder도 없음) — 텍스트 단독 publish 금지. draft fallback.');
+    if (postStatus === 'publish') {
+      const noImgPayload = buildPayload(data, { featuredMediaId: null, status: 'draft', scheduledAt: null, wpSlug: publishedWpId ? (data.workflow_state?.wp_slug || data.slug) : null });
+      try {
+        const fbResult = await publishToWP(noImgPayload, env, publishedWpId);
+        if (fbResult?.id) {
+          writeBackWorkflowState(inputPath, data, fbResult);
+          saveResult(data.slug, fbResult, inputPath, env.WP_URL);
+          console.log(`WP_RESULT_JSON: ${JSON.stringify({ post_id: fbResult.id, slug: fbResult.slug, status: fbResult.status })}`);
+        }
+      } catch (fbErr) {
+        console.error(`  ✗ draft fallback 실패: ${fbErr.message}`);
+      }
+      console.error('  ✗ 대표 이미지 없어 draft 저장. 이미지 확보 후 재실행하세요.');
+    }
+    process.exit(1);
   }
 
   // 5.5) 본문 이미지 업로드 + HTML 주입
@@ -993,12 +1062,16 @@ async function main() {
     }
   }
 
-  // 5.8) slug 중복 확인 (WP_SLUG_CHECK=1 일 때만)
-  data.slug = await ensureUniqueWpSlug(data.slug, env);
-  console.log(`slug(확정): ${data.slug}`);
+  // 5.8) slug 중복 확인 (WP_SLUG_CHECK=1 일 때만, update 모드는 스킵)
+  // A4: update 모드에서 slug 재전송 금지 → stored wp_slug 우선 사용 (slug -2/-3/-4 증식 방지)
+  const storedWpSlug = publishedWpId ? (data.workflow_state?.wp_slug || data.slug) : null;
+  if (!publishedWpId) {
+    data.slug = await ensureUniqueWpSlug(data.slug, env);
+  }
+  console.log(`slug(확정): ${storedWpSlug || data.slug}${publishedWpId ? ' [update 모드: stored wp_slug 사용]' : ''}`);
 
   // 6) 페이로드 빌드
-  const payload = buildPayload(data, { featuredMediaId, injectedContentHtml, status: postStatus, scheduledAt });
+  const payload = buildPayload(data, { featuredMediaId, injectedContentHtml, status: postStatus, scheduledAt, wpSlug: storedWpSlug });
 
   // Yoast meta 주입 여부 안내
   if (data.yoast_meta?.focus_keyphrase) {
@@ -1041,19 +1114,10 @@ async function main() {
     console.warn(`     확인: WordPress 관리자 > 사용자 > 역할 (Author/Editor/Administrator 필요).`);
   }
 
-  // 발행 성공 후 published_wp_id를 draft JSON에 저장 (멱등성 보장)
-  // 다음 실행에서 새 글 생성이 아닌 기존 글 업데이트로 처리됨
+  // 발행 성공 후 workflow_state를 draft JSON에 저장 (멱등성 보장)
+  // A3: published_wp_id + wp_slug + wp_status + published_at + last_publish_attempt + publish_attempts
   if (result && result.id) {
-    try {
-      const currentDraft = JSON.parse(fs.readFileSync(inputPath, 'utf8'));
-      if (!currentDraft.workflow_state) currentDraft.workflow_state = {};
-      currentDraft.workflow_state.published_wp_id = result.id;
-      currentDraft.workflow_state.published_at    = new Date().toISOString();
-      fs.writeFileSync(inputPath, JSON.stringify(currentDraft, null, 2), 'utf8');
-      console.log(`  → published_wp_id=${result.id} draft JSON 저장 완료 (멱등성 보장)`);
-    } catch (e) {
-      console.warn(`  ⚠  published_wp_id 저장 실패: ${e.message}`);
-    }
+    writeBackWorkflowState(inputPath, data, result);
   }
 
   // 결과 저장
