@@ -53,7 +53,8 @@ const today = new Date().toISOString().split('T')[0];
 const isKo = lang === 'ko';
 
 // ── 헬퍼 ─────────────────────────────────────────────────────────────────────
-const KRW = (n) => n ? `${(n / 10000).toFixed(0)}만원` : '정보 없음';
+const KRW = (n) => (n && n > 0) ? `${(n / 10000).toFixed(0)}만원` : null;
+const KRW_OR = (n, fallback = '정보 없음') => KRW(n) || fallback;
 
 function coverageNote(score) {
   if (score == null || score >= 80) return '';
@@ -78,7 +79,7 @@ function inferPros(h) {
 // 단점/주의 규칙 기반 도출
 function inferCons(h) {
   const cons = [];
-  if (h.price_min && h.price_min >= 300000) cons.push(`1박 기준 ${KRW(h.price_min)} 이상 — 예산 부담 가능`);
+  if (h.price_min && h.price_min >= 300000) cons.push(`1박 기준 ${KRW(h.price_min) || Math.round(h.price_min/10000)+'만원'} 이상 — 예산 부담 가능`);
   if (h.station_walk_min && h.station_walk_min > 10) cons.push(`${h.nearest_station}까지 도보 ${h.station_walk_min}분 — 대중교통 접근 다소 불편`);
   if (h.review_summary && h.review_summary.includes('높다')) cons.push('가격 대비 가치에 대한 의견 엇갈림');
   if (!h.transport_info) cons.push('교통/동선 정보 추가 확인 필요');
@@ -335,8 +336,9 @@ function buildQuickSummary() {
   } else {
     const h = hotels[0];
     lines.push(`> - **${hotelName(h)}**는 ${inferTarget(h)}에게 적합합니다.`);
-    lines.push(`> - 위치: ${h.nearest_station || '정보 없음'} 도보 ${h.station_walk_min || '?'}분`);
-    lines.push(`> - 가격대: ${KRW(h.price_min)} ~ ${KRW(h.price_max)}`);
+    if (h.nearest_station) lines.push(`> - 위치: ${h.nearest_station} 도보 ${h.station_walk_min || '?'}분`);
+    const priceStr = KRW(h.price_min) ? `${KRW(h.price_min)}${KRW(h.price_max) ? ' ~ ' + KRW(h.price_max) : '~'}` : null;
+    if (priceStr) lines.push(`> - 가격대: ${priceStr}`);
   }
 
   lines.push('>');
@@ -356,7 +358,8 @@ function buildTargetReader() {
     lines.push(`${cityName}에서 호텔을 고르는 중인데 어디가 더 나은지 판단이 서지 않는 분을 위한 글입니다. ${personaPart}각 호텔의 장단점을 직접 비교해 상황에 맞는 선택을 하고 싶은 분께 도움이 됩니다.`);
   } else {
     const h = hotels[0];
-    lines.push(`${hotelName(h)} 예약을 고민 중인 ${personaStr}을 위한 글입니다. 위치, 시설, 실제 투숙 후기 기반 장단점을 정리해 예약 전 의사결정을 돕습니다.`);
+    const readerDesc = personaStr || '호텔 예약을 고민 중인 여행자';
+    lines.push(`${hotelName(h)} 예약을 고민 중인 ${readerDesc}를 위한 글입니다. 위치, 시설, 실제 투숙 후기 기반 장단점을 정리해 예약 전 의사결정을 돕습니다.`);
   }
   lines.push('');
   return lines.join('\n');
@@ -384,7 +387,7 @@ function buildComparisonTable() {
 
   const rows = [
     ['위치',     h => h.nearest_station ? `${h.nearest_station} 도보 ${h.station_walk_min}분` : '정보 없음'],
-    ['가격대',   h => `${KRW(h.price_min)} ~`],
+    ['가격대',   h => KRW(h.price_min) ? `${KRW(h.price_min)}~` : '확인 필요'],
     ['별점',     h => h.star_rating ? `${h.star_rating}성급` : '정보 없음'],
     ['리뷰점수', h => h.review_score ? `${h.review_score}점` : '정보 없음'],
     ['조식',     h => (h.amenities || []).includes('조식뷔페') ? '포함 옵션' : '별도 확인'],
@@ -407,9 +410,13 @@ function buildHotelSection(h) {
   const cons = inferCons(h);
   const target = inferTarget(h);
 
-  const positioning = h.location_description
-    ? h.location_description.slice(0, 25)
-    : (h.nearest_station ? `${h.nearest_station} 인근` : (h.district || h.city || '서울'));
+  // location_description이 한국어일 때만 포지셔닝에 사용 (영문 overview 차단)
+  const locDescKo2 = (h.location_description && /[가-힣]/.test(h.location_description))
+    ? h.location_description.slice(0, 25) : null;
+  const positioning = locDescKo2
+    || (h.nearest_station ? `${h.nearest_station} 인근` : null)
+    || (h.district ? `${h.district} 소재` : null)
+    || (h.city ? cityKo(h.city) + ' 위치' : '서울 소재');
   lines.push(`### ${name} — ${positioning}`);
   lines.push('');
   lines.push(coverageNote(h.coverage_score));
@@ -422,7 +429,7 @@ function buildHotelSection(h) {
   if (h.star_rating) stats.push(`${h.star_rating}성급`);
   if (h.review_score) stats.push(`평점 ${h.review_score}/10 (${(h.review_count || 0).toLocaleString()}건)`);
   if (h.nearest_station) stats.push(`${h.nearest_station} 도보 ${h.station_walk_min}분`);
-  if (h.price_min) stats.push(`1박 ${KRW(h.price_min)}~`);
+  if (KRW(h.price_min)) stats.push(`1박 ${KRW(h.price_min)}~`);
   if (stats.length > 0) {
     lines.push(`**핵심 정보:** ${stats.join(' | ')}`);
     lines.push('');
@@ -438,12 +445,20 @@ function buildHotelSection(h) {
 
   if (h.transport_info) {
     lines.push(`**위치 & 동선:** ${h.transport_info}`);
+  } else if (h.nearest_station) {
+    lines.push(`**위치 & 동선:** ${h.nearest_station} 도보 ${h.station_walk_min || '?'}분`);
+  } else if (h.location_description) {
+    // English overview는 표시 안 함 — 위치 정보 없음으로 처리
+    lines.push(`**위치 & 동선:** 공식 채널에서 교통 정보 확인 권장`);
   } else {
-    lines.push(`**위치 & 동선:** ${h.nearest_station || '정보 없음'} 도보 ${h.station_walk_min || '?'}분`);
+    lines.push(`**위치 & 동선:** 공식 채널에서 교통 정보 확인 권장`);
   }
   lines.push('');
 
-  lines.push(`**가격대:** ${KRW(h.price_min)} ~ ${KRW(h.price_max)} *(실제 가격은 예약 페이지 기준)*`);
+  const priceDisplay = KRW(h.price_min)
+    ? `${KRW(h.price_min)}${KRW(h.price_max) ? ' ~ ' + KRW(h.price_max) : '~'} *(실제 가격은 예약 페이지 기준)*`
+    : '예약 페이지에서 실시간 가격 확인';
+  lines.push(`**가격대:** ${priceDisplay}`);
   lines.push('');
 
   if (h.review_score && h.review_count) {
@@ -481,7 +496,9 @@ function buildFAQ() {
     lines.push(`A. ${checkinInfo}. 조기 체크인·레이트 체크아웃은 사전 요청 및 추가 요금이 발생할 수 있습니다.`);
   } else {
     lines.push(`**Q. ${hotelName(h1)}는 어떤 여행자에게 적합한가요?**`);
-    lines.push(`A. ${inferTarget(h1)}에게 특히 추천합니다. ${h1.location_description || '위치와 시설이 잘 갖춰져 있습니다.'}`);
+    // location_description이 영문 overview인 경우 사용 안 함 (한국어 판단: 한글 포함 여부 확인)
+    const locDescKo = h1.location_description && /[가-힣]/.test(h1.location_description) ? h1.location_description : null;
+    lines.push(`A. ${inferTarget(h1)}에게 특히 추천합니다. ${locDescKo || (h1.nearest_station ? `${h1.nearest_station} 근처에 위치해 이동이 편리합니다.` : '시설과 서비스 측면에서 편안한 숙박을 원하는 분께 적합합니다.')}`);
     lines.push('');
     if (h1.nearest_station) {
       lines.push(`**Q. ${hotelName(h1)}에서 주요 관광지·쇼핑가까지 이동은 어떻게 되나요?**`);
@@ -560,7 +577,8 @@ function buildTop5HotelSection(h, rank, th) {
   lines.push('');
   lines.push(`- **${TOP5_THEME_LABEL[th] || '평점'}:** ${field}`);
   lines.push(`- **위치:** ${h.nearest_station ? `${h.nearest_station} 도보 ${h.station_walk_min}분` : h.district || h.city || '정보 없음'}`);
-  lines.push(`- **가격대:** ${KRW(h.price_min)} ~ ${KRW(h.price_max)} *(예약 페이지 기준 확인 필요)*`);
+  const top5Price = KRW(h.price_min) ? `${KRW(h.price_min)}${KRW(h.price_max) ? ' ~ ' + KRW(h.price_max) : '~'}` : '예약 페이지 확인';
+  lines.push(`- **가격대:** ${top5Price} *(예약 페이지 기준 확인 필요)*`);
   if ((h.amenities || []).length > 0) {
     lines.push(`- **주요 시설:** ${h.amenities.slice(0, 4).join(', ')}`);
   }

@@ -143,7 +143,9 @@ function buildMetaDescription(hotels, lang, postType, theme) {
   if (hotels.length === 1) {
     const h = hotels[0];
     if (lang === 'ko') {
-      return `${h.hotel_name} 리뷰: 위치(${h.nearest_station} 도보 ${h.station_walk_min}분), 장단점, 추천 대상을 실제 데이터로 정리했습니다. 예약 전 꼭 확인하세요.`;
+      const locPart = (h.nearest_station && h.station_walk_min)
+        ? `위치(${h.nearest_station} 도보 ${h.station_walk_min}분), ` : '';
+      return `${h.hotel_name} 리뷰: ${locPart}장단점, 추천 대상을 실제 데이터로 정리했습니다. 예약 전 꼭 확인하세요.`;
     }
     return `${h.hotel_name_en || h.hotel_name} review: location, pros and cons, and who it's best for — all based on real data.`;
   }
