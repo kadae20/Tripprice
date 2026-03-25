@@ -46,7 +46,7 @@ const SUPPORTED_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', 
 
 // 워터마크 설정 (--watermark 옵션 사용 시)
 const WATERMARK_CONFIG = {
-  text: 'tripprice',
+  text: 'tripprice.net',
   sizeRatio: 0.08,   // 이미지 너비의 8%
   opacity: 0.6,
   position: 'bottom-right',

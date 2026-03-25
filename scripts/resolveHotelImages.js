@@ -246,6 +246,26 @@ async function resolve(hotelId, draftPath) {
     }
   }
 
+  // ── 소스 2b: data/processed/{hotel_id}.json 의 photo1~photo5 ─────────────────
+  if (idxCounter < TARGET_COUNT) {
+    const dataFile = path.join(ROOT, 'data', 'processed', `${hotelId}.json`);
+    if (fs.existsSync(dataFile)) {
+      try {
+        const hotelData = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
+        const photoUrls = [hotelData.photo1, hotelData.photo2, hotelData.photo3, hotelData.photo4, hotelData.photo5].filter(Boolean);
+        if (photoUrls.length > 0) {
+          console.log(`  → photo1-5 URL ${photoUrls.length}개 발견 → 다운로드+변환 시작`);
+          const { fetchAndProcess } = require('./fetch-hotel-photos');
+          await fetchAndProcess(hotelId, { watermark: false });
+          // 변환 후 재카운트
+          idxCounter = countLocalImages(outDir);
+        }
+      } catch (err) {
+        console.warn(`  ⚠  photo1-5 처리 실패 (계속): ${err.message}`);
+      }
+    }
+  }
+
   // ── 소스 3: Agoda Affiliate Lite API ────────────────────────────────────
   if (idxCounter < TARGET_COUNT && draft) {
     const agodaId = extractAgodaHotelId(draft);
