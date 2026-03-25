@@ -290,11 +290,28 @@ function normalizeHotel(raw) {
   }
 
   // ── partner_url: agoda_hotel_id로 자동 생성 ───
-  const agodaId = (raw.agoda_hotel_id || '').trim();
+  const cid = process.env.AGODA_CID || '1926938';
+  let agodaId = (raw.agoda_hotel_id || '').trim();
   const utmCampaign = (raw.utm_campaign || hotelId).trim();
   let partnerUrl = (raw.partner_url || '').trim();
+
+  // partner_url에 cid 없으면 추가
+  if (partnerUrl && !partnerUrl.includes('cid=')) {
+    try {
+      const u = new URL(partnerUrl);
+      u.searchParams.set('cid', cid);
+      partnerUrl = u.toString();
+    } catch { /* 잘못된 URL 무시 */ }
+  }
+
+  // agoda_hotel_id 폴백: partner_url의 hid= 파라미터에서 추출
+  if (!agodaId && partnerUrl) {
+    const m = partnerUrl.match(/[?&]hid=(\d+)/);
+    if (m) agodaId = m[1];
+  }
+
+  // partner_url 없으면 agodaId로 생성
   if (!partnerUrl && agodaId) {
-    const cid = process.env.AGODA_CID || '1926938';
     partnerUrl = `https://www.agoda.com/hotel/${agodaId}?cid=${cid}&tag=${utmCampaign}`;
   }
 

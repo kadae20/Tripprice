@@ -46,8 +46,10 @@ const OUTPUT_HEADERS = [
 // 앞쪽 후보일수록 우선순위 높음
 const CANDIDATES = {
   // Agoda 숫자 ID (agoda_hotel_id 출력에 사용)
+  // hotel_id 는 Agoda CSV에서 숫자 ID 컬럼명 — 최후 폴백으로 추가
   agoda_hotel_id:  ['objectid', 'object_id', 'propertyid', 'property_id',
-                    'hotelid', 'hotel_id_agoda', 'agoda_hotel_id', 'agodaid'],
+                    'hotelid', 'hotel_id_agoda', 'agoda_hotel_id', 'agodaid',
+                    'hotel_id'],
   // 영문 호텔명 (slug 생성에 사용)
   hotel_name_en:   ['propertyname', 'property_name', 'hotel_name_en',
                     'hotelname', 'hotel_name_english', 'englishname', 'english_name',
@@ -227,6 +229,7 @@ async function main() {
   let totalRead    = 0;
   let totalWritten = 0;
   let totalSkipped = 0;
+  let generatedOverview = 0;     // overview 자동 생성 카운터
   const missingFieldCount = {};  // 누락/폴백 사유 집계
   const samples = [];            // 리포트용 샘플 (최대 10개)
   const slugMap = new Map();     // 슬러그 충돌 카운터
@@ -358,6 +361,32 @@ async function main() {
           photosCount = nonEmpty > 0 ? String(nonEmpty) : '';
         }
 
+        // overview 없으면 메타데이터 기반 자동 생성 (최소 100자)
+        let overview = get('overview').trim();
+        if (!overview) {
+          const stars    = get('star_rating');
+          const chainRaw = get('chain_name');
+          const accType  = (get('accommodation_type') || 'hotel').toLowerCase();
+          const cityName = city.charAt(0).toUpperCase() + city.slice(1);
+          const checkin  = get('checkin_time') || get('checkin') || '';
+          const rooms    = get('numberrooms');
+          const rating   = get('rating_average');
+          const reviews  = get('number_of_reviews');
+
+          const parts = [];
+          if (chainRaw) parts.push(`${hotelName} is part of the ${chainRaw} group`);
+          else parts.push(`${hotelName} is a ${stars ? stars + '-star' : ''} ${accType} in ${cityName}`.replace(/\s+/g, ' ').trim());
+          if (stars && !chainRaw) parts[0] += `, offering ${stars}-star services and facilities`;
+          if (checkin) parts.push(`Check-in is available from ${checkin}`);
+          if (rooms) parts.push(`The property features ${rooms} rooms`);
+          if (rating && parseFloat(rating) > 0) parts.push(`Rated ${rating} by guests`);
+          if (reviews && parseInt(reviews, 10) >= 10) parts.push(`with ${reviews} guest reviews`);
+          parts.push(`Conveniently located in the heart of ${cityName}, ideal for both business and leisure travellers.`);
+
+          overview = parts.join('. ').replace(/\.\./g, '.').trim();
+          generatedOverview++;
+        }
+
         const row = [
           hotelId,
           hotelName,
@@ -378,7 +407,7 @@ async function main() {
           get('currency'),
           get('checkin_time'),
           get('checkout_time'),
-          get('overview'),
+          overview,
           get('numberrooms'),
           get('chain_name'),
           photoVals[0],
@@ -435,6 +464,7 @@ async function main() {
   md += `| 읽은 행 | ${totalRead.toLocaleString()} |\n`;
   md += `| 변환 성공 | ${totalWritten.toLocaleString()} |\n`;
   md += `| 건너뜀 | ${totalSkipped.toLocaleString()} |\n`;
+  md += `| overview 자동생성 | ${generatedOverview.toLocaleString()} |\n`;
   md += `| AGODA_CID | ${CID} |\n\n`;
 
   if (Object.keys(missingFieldCount).length > 0) {
@@ -465,6 +495,7 @@ async function main() {
   console.log(`  읽은 행   : ${totalRead.toLocaleString()}`);
   console.log(`  변환 성공 : ${totalWritten.toLocaleString()}`);
   console.log(`  건너뜀    : ${totalSkipped.toLocaleString()}`);
+  console.log(`  overview 자동생성: ${generatedOverview.toLocaleString()}`);
   console.log(`  출력 크기 : ${outKB}KB`);
   console.log(`  출력 파일 : ${path.relative(ROOT, OUTPUT_CSV)}`);
   console.log(`  리포트    : ${path.relative(ROOT, reportPath)}`);

@@ -217,6 +217,59 @@ function extractHotelName(draft) {
     .replace(/\b\w/g, c => c.toUpperCase());
 }
 
+// ── SEO 제목 교체: 고정 문구 탈피, 호텔·지역 키워드 차별화 ───────────────────
+// "솔직 리뷰 — 추천 대상…" 같은 고정 패턴을 slug seed 기반 5종 템플릿으로 교체
+const TITLE_PATTERNS_BAD = [
+  /솔직\s*리뷰\s*[—-]\s*추천\s*대상/,
+  /솔직 리뷰/,
+  /Normal Hotel Review/i,
+  /hotel review \d{4}/i,
+  /리뷰 \d{4}/,
+];
+function isBadTitle(title) {
+  const t = String(title || '');
+  return !t.trim() || TITLE_PATTERNS_BAD.some(p => p.test(t));
+}
+
+// 5종 SEO 제목 템플릿 (seed 선택)
+const TITLE_TEMPLATES = [
+  (name, loc, yr) => `${name} 후기 | ${loc.area} 숙소 추천? 가성비·단점까지 정리 ${yr}`,
+  (name, loc, yr) => `${loc.area} ${name} 숙박기: 위치(${loc.transport})·체크인 팁·가격대`,
+  (name, loc, yr) => `${name} 리뷰: ${loc.area}에 좋은 이유 3가지 + 비추천 2가지 ${yr}`,
+  (name, loc)     => `${name} — ${loc.area} 입지·시설·단점 솔직 분석 (예약 전 필독)`,
+  (name, loc, yr) => `${loc.area} 숙소 고민? ${name} 장단점·가격·위치 총정리 ${yr}`,
+];
+
+function generateSeoTitle(draft, seed) {
+  const name = extractHotelName(draft);
+  const seedSlug = String(draft.slug || draft.hotel_id || name);
+  const s = seed !== undefined ? seed : slugHash(seedSlug);
+  const loc  = getLocHint(seedSlug);
+  const yr   = new Date().getFullYear();
+  const tmpl = TITLE_TEMPLATES[s % TITLE_TEMPLATES.length];
+  return tmpl(name, loc, yr).slice(0, 60);
+}
+
+// SEO meta_description 생성 (120~155자)
+const META_TEMPLATES = [
+  (name, loc) => `${name}에 대한 솔직한 후기입니다. ${loc.area} 위치, 체크인 시간, 시설, 실제 가격대까지 예약 전 알아야 할 정보를 정리했습니다. 장단점 모두 포함.`,
+  (name, loc) => `${loc.area} 여행 시 ${name} 숙박을 고려 중이신가요? ${loc.transport} 접근성, 객실 상태, 조식 여부, 주변 맛집 동선까지 핵심만 모았습니다.`,
+  (name, loc) => `${name} 실제 투숙 데이터 기반 리뷰. ${loc.area}에서 가성비·위치·서비스를 비교해 "이런 여행자에게 맞다/맞지 않다"를 구체적으로 정리했습니다.`,
+];
+
+function generateMetaDesc(draft, seed) {
+  const name = extractHotelName(draft);
+  const s = seed !== undefined ? seed : slugHash(String(draft.slug || draft.hotel_id || name));
+  const loc  = getLocHint(String(draft.slug || ''));
+  const raw  = META_TEMPLATES[s % META_TEMPLATES.length](name, loc);
+  // 120~155자 맞추기
+  if (raw.length >= 120 && raw.length <= 155) return raw;
+  if (raw.length > 155) return raw.slice(0, 152) + '…';
+  // 너무 짧으면 suffix 추가
+  const suffix = ` 예약 전 이 글을 먼저 확인하세요.`;
+  return (raw + suffix).slice(0, 155);
+}
+
 // 리드 문단: slug seed로 1개 선택 (5종)
 const QP_LEADS = [
   (name, loc) => `${name}은 ${loc.area}에 위치한 숙소입니다. ${loc.transport}를 이용하면 주요 관광지·쇼핑·맛집까지 효율적으로 이동할 수 있으며, 짧은 일정이라도 동선 낭비 없이 여행을 즐길 수 있습니다. 이 글에서는 예약 전 꼭 알아야 할 포인트들을 정리했습니다.`,
@@ -390,13 +443,31 @@ function main() {
   const curTotalImg  = (hasFeatured ? 1 : 0) + imgInHtml + curImgSecs;
 
   // ── 변경 계획 수립 ─────────────────────────────────────────────────────────
-  const plan = { textAdded: 0, imagesAdded: 0, featuredSet: false, sectionsAdded: [], h3Added: 0, diffAdded: 0, qpAdded: false };
+  const plan = { textAdded: 0, imagesAdded: 0, featuredSet: false, sectionsAdded: [], h3Added: 0, diffAdded: 0, qpAdded: false, titlePatched: false, metaPatched: false };
 
   // slug 기반 멱등 seed (재실행해도 동일 결과 — 호텔마다 다른 섹션 순서/구성)
   const seedSlug = String(draft.slug || draft.hotel_id || path.basename(absPath, '.json'));
   const seed = slugHash(seedSlug);
   // BOOSTER_MD 시작 오프셋: 호텔마다 다른 위치에서 시작 → 반복 패턴 해소
   const boosterOffset = seed % BOOSTER_MD.length;
+
+  // 0) SEO 제목 교체: 고정/불량 패턴 감지 시 seed 기반 차별화 제목으로 교체
+  if (isBadTitle(draft.post_title)) {
+    const newTitle = generateSeoTitle(draft, seed);
+    console.log(`  [title] "${String(draft.post_title || '').slice(0, 40)}" → "${newTitle}"`);
+    draft.post_title = newTitle;
+    plan.titlePatched = true;
+  }
+
+  // 0b) meta_description: 없거나 120자 미만이면 생성
+  const curMeta = String(draft.meta_description || draft.yoast_meta?.description || '').trim();
+  if (!curMeta || curMeta.length < 120 || curMeta.length > 155) {
+    const newMeta = generateMetaDesc(draft, seed);
+    draft.meta_description = newMeta;
+    if (draft.yoast_meta) draft.yoast_meta.description = newMeta;
+    plan.metaPatched = true;
+    console.log(`  [meta_desc] ${curMeta.length}자 → ${newMeta.length}자 교체`);
+  }
 
   // 1) 텍스트 보강: QA가 읽는 소스에 동일한 형식으로 섹션 append
   const CYCLE_SUFFIXES = ['', ' — 추가 안내'];

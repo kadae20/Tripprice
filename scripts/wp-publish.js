@@ -1004,12 +1004,38 @@ async function main() {
     }
   }
 
-  // step 4: placeholder fallback
+  // step 4: placeholder fallback (publish 시에는 placeholder 금지 — draft 저장만 허용)
+  const PLACEHOLDER_PATTERNS = [
+    /via\.placeholder\.com/i,
+    /placeholder\.com/i,
+    /tripprice[^/]*placeholder/i,
+    /assets[\\/]placeholder[\\/]/i,
+  ];
+  function isPlaceholderUrl(url) {
+    const s = String(url || '');
+    return PLACEHOLDER_PATTERNS.some(p => p.test(s));
+  }
+
+  // 이미 resolved된 URL이 placeholder라면 publish에서 실격 처리
+  if (fmuResolved && isPlaceholderUrl(fmuResolved) && postStatus === 'publish') {
+    console.warn(`  ⚠  대표 이미지가 placeholder → publish 불가. draft로 보관.`);
+    console.warn(`     placeholder URL: ${String(fmuResolved).slice(0, 80)}`);
+    console.warn(`     quarantine_reason=missing_real_images`);
+    fmuResolved = null; // 아래 "이미지 없음" 분기에서 draft fallback 처리하도록
+  }
+
   if (!fmuResolved) {
     const placeholderPath = path.join(ROOT, 'assets', 'placeholder', 'featured.webp');
     if (fs.existsSync(placeholderPath)) {
-      fmuResolved = path.relative(ROOT, placeholderPath);
-      console.log(`  대표 이미지: placeholder 사용 → ${fmuResolved}`);
+      if (postStatus !== 'publish') {
+        // draft 모드: placeholder 허용
+        fmuResolved = path.relative(ROOT, placeholderPath);
+        console.log(`  대표 이미지: placeholder 사용 (draft 전용) → ${fmuResolved}`);
+      } else {
+        // publish 모드: placeholder 금지 → 이미지 없음으로 처리
+        console.warn(`  ⚠  placeholder 이미지만 존재 — publish 금지. draft fallback.`);
+        console.warn(`     quarantine_reason=missing_real_images`);
+      }
     }
   }
 

@@ -131,8 +131,26 @@ function hasWpEnv() {
   return !!(process.env.WP_URL && process.env.WP_USER && process.env.WP_APP_PASS);
 }
 
+// ── 파일명에서 날짜 추출: post-{slug}-YYYY-MM-DD.json ────────────────────────
+function extractFilenameDate(filename) {
+  const m = filename.match(/(\d{4}-\d{2}-\d{2})\.json$/);
+  return m ? m[1] : null;
+}
+
+// ── drafts 폴더의 파일명에서 가장 최신 날짜 탐색 ─────────────────────────────
+function newestDateInDraftFilenames() {
+  if (!fs.existsSync(DRAFTS_DIR)) return null;
+  let newest = null;
+  for (const f of fs.readdirSync(DRAFTS_DIR)) {
+    if (!f.startsWith('post-') || !f.endsWith('.json') || f.endsWith('.qa.json')) continue;
+    const d = extractFilenameDate(f);
+    if (d && (!newest || d > newest)) newest = d;
+  }
+  return newest;
+}
+
 // ── draft 파일 목록 필터링 ────────────────────────────────────────────────────
-function getDraftFiles(args) {
+function getDraftFiles(args, overrideSince) {
   if (!fs.existsSync(DRAFTS_DIR)) return [];
 
   let files = fs.readdirSync(DRAFTS_DIR)
@@ -144,12 +162,14 @@ function getDraftFiles(args) {
     files = files.filter(f => f.includes(args.match));
   }
 
-  // --since: YYYY-MM-DD 이후 수정된 파일
-  if (args.since) {
-    const sinceMs = new Date(args.since).getTime();
+  // --since: 파일명 날짜(YYYY-MM-DD) 기준 — mtime이 아닌 파일명 날짜 우선
+  const since = overrideSince || args.since;
+  if (since) {
     files = files.filter(f => {
+      const fnDate = extractFilenameDate(f);
+      if (fnDate) return fnDate >= since;        // 파일명 날짜 기준
       const stat = fs.statSync(path.join(DRAFTS_DIR, f));
-      return stat.mtimeMs >= sinceMs;
+      return stat.mtimeMs >= new Date(since).getTime(); // fallback: mtime
     });
   }
 
@@ -300,17 +320,49 @@ function main() {
   if (!dryRun && !noMove && !wpOk) console.log('  ⚠  WP 환경변수 없음 → draft only (발행 스킵)');
   console.log('');
 
-  const files = getDraftFiles(args);
+  let files = getDraftFiles(args);
+  let usedSince = args.since || null;
+
+  // ── since fallback: 오늘 날짜로 후보 0건이면 자동으로 최신 날짜 또는 최근 7일로 재탐색
+  if (files.length === 0 && args.since) {
+    const newestDate = newestDateInDraftFilenames();
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+      .toISOString().split('T')[0];
+    const fallbackSince = newestDate || sevenDaysAgo;
+
+    if (fallbackSince !== args.since) {
+      console.log(`  ℹ  --since=${args.since} 기준 후보 없음 → fallback since=${fallbackSince} 로 재탐색`);
+      files = getDraftFiles(args, fallbackSince);
+      usedSince = fallbackSince;
+    }
+  }
+
   if (files.length === 0) {
     console.log(`  wordpress/drafts/ 에 post-*.json 없음`);
     if (args.match)  console.log(`  (--match=${args.match} 필터 적용됨)`);
-    if (args.since)  console.log(`  (--since=${args.since} 필터 적용됨)`);
+    if (usedSince)   console.log(`  (since=${usedSince} 기준 — 대상 없음은 정상)`);
+    // 실패가 아닌 정상 종료 — NO_CANDIDATES
+    const noCandSummary = { status: 'NO_CANDIDATES', since: usedSince, match: args.match || null, savedAt: new Date().toISOString() };
+    savePublishLog([]);
+    console.log(`  status=NO_CANDIDATES (후보 0건은 오류/거부가 아닙니다)`);
+    console.log('══════════════════════════════════════════════\n');
     return;
   }
 
-  console.log(`  대상 파일: ${files.length}개\n`);
+  console.log(`  대상 파일: ${files.length}개 (since=${usedSince || '전체'})\n`);
 
-  const summary = { total: files.length, qaPass: 0, qaFail: 0, queued: 0, published: 0, wpDraftSaved: 0, skipped: 0, errors: 0, patched: 0, repass: 0, patchSkipped: 0, limitReached: 0, blockedQuarantined: 0 };
+  const summary = {
+    status: 'OK',
+    total: files.length, qaPass: 0, qaFail: 0,
+    queued: 0,
+    publishedOk: 0,       // publish 또는 future 상태로 실제 공개 성공
+    wpDraftSaved: 0,       // WP에 draft로만 저장 (publish 권한 부족 등)
+    quarantined: 0,        // 격리 (이미지 없음/blocked 등)
+    blockedSkipped: 0,     // blocked 호텔 건너뜀
+    skipped: 0, errors: 0, patched: 0, repass: 0, patchSkipped: 0, limitReached: 0,
+    // 하위 호환 유지
+    published: 0, blockedQuarantined: 0,
+  };
   const failReasons = {};  // QA 실패 원인 유형별 집계
   const logRecords  = [];  // 발행 로그 (logs/publish-auto-DATE.json에 저장)
   const trackReasons = (errors) => errors.forEach(e => {
@@ -522,28 +574,37 @@ function main() {
   }
 
   // ── 요약 ──────────────────────────────────────────────────────────────────
+  // publishedOk/blockedQuarantined 하위 호환 동기화
+  summary.publishedOk       = summary.publishedOk || summary.published || 0;
+  summary.quarantined       = summary.quarantined  || summary.blockedQuarantined || 0;
+  summary.blockedSkipped    = summary.blockedSkipped || 0;
+
   console.log('══════════════════════════════════════════════');
-  console.log(`  완료: 총 ${summary.total}개`);
-  console.log(`    QA 통과: ${summary.qaPass} | QA 실패: ${summary.qaFail}`);
+  console.log(`  완료 [status=${summary.status}]: 총 ${summary.total}개`);
+  console.log(`    QA 통과: ${summary.qaPass} | QA 미통과: ${summary.qaFail}`);
   if (!dryRun) {
-    if (summary.blockedQuarantined > 0) {
-      console.log(`    blocked 격리: ${summary.blockedQuarantined}건 (quarantine_reason=blocked_hotel)`);
+    if (summary.blockedSkipped > 0 || summary.blockedQuarantined > 0) {
+      const cnt = (summary.blockedSkipped || 0) + (summary.blockedQuarantined || 0);
+      console.log(`    blocked 호텔 건너뜀: ${cnt}건`);
+    }
+    if (summary.quarantined > 0) {
+      console.log(`    격리(quarantine): ${summary.quarantined}건 — 이미지 없음 또는 blocked`);
     }
     if (summary.patched > 0 || summary.patchSkipped > 0) {
       console.log(`    자동 보강: ${summary.patched}건 시도 | 보강 후 PASS: ${summary.repass}건 | 한도초과 스킵: ${summary.patchSkipped}건`);
     }
     if (summary.qaFail > 0 && Object.keys(failReasons).length > 0) {
       const top3 = Object.entries(failReasons).sort((a, b) => b[1] - a[1]).slice(0, 3);
-      console.log(`    QA 실패 원인 TOP3: ${top3.map(([k, v]) => `${k}(${v}건)`).join(' | ')}`);
+      console.log(`    QA 미통과 원인 TOP3: ${top3.map(([k, v]) => `${k}(${v}건)`).join(' | ')}`);
     }
     if (noMove) {
       console.log(`    NO-MOVE: queued ${summary.queued}건 (파일 이동 없음)`);
     } else if (publish) {
-      console.log(`    발행 성공(publish/future): ${summary.published} | WP draft 저장: ${summary.wpDraftSaved} | WP 스킵: ${summary.skipped} | 발행 오류: ${summary.errors}`);
+      console.log(`    공개 발행(publish/future): ${summary.publishedOk}건 | WP draft 보관: ${summary.wpDraftSaved}건 | WP 스킵: ${summary.skipped}건 | 오류: ${summary.errors}건`);
       if (summary.wpDraftSaved > 0) {
-        console.log(`    ⚠  WP draft 저장 ${summary.wpDraftSaved}건 — publish 권한 부족 가능성. WP 관리자에서 직접 게시 필요.`);
+        console.log(`    ℹ  WP draft 보관 ${summary.wpDraftSaved}건 — 이미지 미확보 또는 권한 제한으로 임시 저장`);
       }
-      if (summary.limitReached > 0) console.log(`    한도 초과 queued: ${summary.limitReached}건 (max-publish=${maxPublish})`);
+      if (summary.limitReached > 0) console.log(`    일일 한도 초과 대기: ${summary.limitReached}건 (max-publish=${maxPublish})`);
     } else {
       console.log(`    발행 준비됨(queued): ${summary.queued} (발행하려면 --publish 추가)`);
     }
