@@ -211,10 +211,15 @@ function getLocHint(slug) {
 }
 function extractHotelName(draft) {
   if (draft.hotel_name) return String(draft.hotel_name).trim();
-  const title = String(draft.post_title || '').replace(/\s*(후기|리뷰|review|\d{4}(-\d{2}(-\d{2})?)?)\s*$/i, '').trim();
-  if (title) return title;
-  return String(draft.slug || '').replace(/-(review|2\d{3}.*)?$/, '').replace(/-/g, ' ')
+  // slug에서 날짜/review 접미사 제거 후 호텔명 복원
+  const slugName = String(draft.slug || draft.hotel_id || '')
+    .replace(/-(review|comparison|guide|top\d+).*$/i, '')
+    .replace(/-\d{4}(-\d{2}(-\d{2})?)?$/, '')
+    .replace(/-/g, ' ')
     .replace(/\b\w/g, c => c.toUpperCase());
+  if (slugName) return slugName;
+  // 최후 수단: 제목 끝 부분만 제거 (믿을 수 없는 경우)
+  return String(draft.post_title || '').replace(/\s*(솔직\s*리뷰.*|리뷰.*|후기.*|review.*|\d{4}.*)$/i, '').trim() || 'Hotel';
 }
 
 // ── SEO 제목 교체: 고정 문구 탈피, 호텔·지역 키워드 차별화 ───────────────────
