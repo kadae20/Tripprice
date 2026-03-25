@@ -407,12 +407,26 @@ function buildHotelSection(h) {
   const cons = inferCons(h);
   const target = inferTarget(h);
 
-  lines.push(`## ${name} — ${h.location_description || h.district || h.city}`);
+  const positioning = h.location_description
+    ? h.location_description.slice(0, 25)
+    : (h.nearest_station ? `${h.nearest_station} 인근` : (h.district || h.city || '서울'));
+  lines.push(`### ${name} — ${positioning}`);
   lines.push('');
   lines.push(coverageNote(h.coverage_score));
 
   lines.push(`**추천 대상:** ${target}`);
   lines.push('');
+
+  // 핵심 정보 한 줄 요약
+  const stats = [];
+  if (h.star_rating) stats.push(`${h.star_rating}성급`);
+  if (h.review_score) stats.push(`평점 ${h.review_score}/10 (${(h.review_count || 0).toLocaleString()}건)`);
+  if (h.nearest_station) stats.push(`${h.nearest_station} 도보 ${h.station_walk_min}분`);
+  if (h.price_min) stats.push(`1박 ${KRW(h.price_min)}~`);
+  if (stats.length > 0) {
+    lines.push(`**핵심 정보:** ${stats.join(' | ')}`);
+    lines.push('');
+  }
 
   lines.push('**장점:**');
   pros.forEach(p => lines.push(`- ${p}`));
@@ -469,8 +483,13 @@ function buildFAQ() {
     lines.push(`**Q. ${hotelName(h1)}는 어떤 여행자에게 적합한가요?**`);
     lines.push(`A. ${inferTarget(h1)}에게 특히 추천합니다. ${h1.location_description || '위치와 시설이 잘 갖춰져 있습니다.'}`);
     lines.push('');
-    lines.push(`**Q. ${hotelName(h1)} 주변 관광지는 어떻게 되나요?**`);
-    lines.push(`A. ${h1.transport_info || `${h1.nearest_station || '인근 역'}에서 접근 가능하며, 주변 관광 동선 정보는 추후 업데이트 예정입니다.`}`);
+    if (h1.nearest_station) {
+      lines.push(`**Q. ${hotelName(h1)}에서 주요 관광지·쇼핑가까지 이동은 어떻게 되나요?**`);
+      lines.push(`A. ${h1.nearest_station} 도보 ${h1.station_walk_min || '?'}분 거리에 있습니다. ${h1.transport_info || '지하철을 이용하면 시내 주요 지점까지 편리하게 이동할 수 있습니다.'}`);
+    } else {
+      lines.push(`**Q. ${hotelName(h1)} 주변 이동은 편리한가요?**`);
+      lines.push(`A. ${h1.transport_info || h1.location_description || '교통 정보는 공식 채널에서 확인하시기 바랍니다.'}`);
+    }
     lines.push('');
     lines.push(`**Q. 가격은 어느 시기가 가장 저렴한가요?**`);
     lines.push(`A. 비수기(1~2월, 6~8월 평일)에 상대적으로 저렴한 요금을 기대할 수 있습니다. 실시간 가격은 예약 페이지에서 확인하세요.`);
@@ -633,6 +652,7 @@ function buildTemplateBody() {
   if (post_type === 'hotel-comparison') {
     parts.push(buildComparisonTable());
   }
+  parts.push(`## 호텔 ${post_type === 'hotel-comparison' ? '비교' : '상세'} 분석\n`);
   hotels.forEach(h => parts.push(buildHotelSection(h)));
   parts.push(buildFAQ());
   parts.push(buildInternalLinks());
