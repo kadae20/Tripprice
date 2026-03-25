@@ -500,12 +500,16 @@ function buildFAQ() {
     const locDescKo = h1.location_description && /[가-힣]/.test(h1.location_description) ? h1.location_description : null;
     lines.push(`A. ${inferTarget(h1)}에게 특히 추천합니다. ${locDescKo || (h1.nearest_station ? `${h1.nearest_station} 근처에 위치해 이동이 편리합니다.` : '시설과 서비스 측면에서 편안한 숙박을 원하는 분께 적합합니다.')}`);
     lines.push('');
+    // 한국어 텍스트만 FAQ에 사용 (영문 overview/transport_info 차단)
+    const koText = t => (t && /[가-힣]/.test(t)) ? t : null;
     if (h1.nearest_station) {
+      const transportNote = koText(h1.transport_info) || '지하철을 이용하면 시내 주요 지점까지 편리하게 이동할 수 있습니다.';
       lines.push(`**Q. ${hotelName(h1)}에서 주요 관광지·쇼핑가까지 이동은 어떻게 되나요?**`);
-      lines.push(`A. ${h1.nearest_station} 도보 ${h1.station_walk_min || '?'}분 거리에 있습니다. ${h1.transport_info || '지하철을 이용하면 시내 주요 지점까지 편리하게 이동할 수 있습니다.'}`);
+      lines.push(`A. ${h1.nearest_station} 도보 ${h1.station_walk_min || '?'}분 거리에 있습니다. ${transportNote}`);
     } else {
+      const transportNote = koText(h1.transport_info) || koText(h1.location_description) || '교통 정보는 예약 시 호텔에 직접 문의하시기 바랍니다.';
       lines.push(`**Q. ${hotelName(h1)} 주변 이동은 편리한가요?**`);
-      lines.push(`A. ${h1.transport_info || h1.location_description || '교통 정보는 공식 채널에서 확인하시기 바랍니다.'}`);
+      lines.push(`A. ${transportNote}`);
     }
     lines.push('');
     lines.push(`**Q. 가격은 어느 시기가 가장 저렴한가요?**`);
