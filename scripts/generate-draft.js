@@ -12,6 +12,30 @@
 const fs = require('fs');
 const path = require('path');
 
+// ── .env / .env.local 자동 로드 (비밀값 로그 출력 없음) ──────────────────────
+;(function loadEnv() {
+  const ROOT = path.resolve(__dirname, '..');
+  for (const fname of ['.env.local', '.env']) {
+    const fp = path.join(ROOT, fname);
+    try {
+      const lines = fs.readFileSync(fp, 'utf8').split('\n');
+      let loaded = 0;
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (!line || line.startsWith('#')) continue;
+        const eqIdx = line.indexOf('=');
+        if (eqIdx < 1) continue;
+        const key = line.slice(0, eqIdx).trim();
+        let val = line.slice(eqIdx + 1).trim();
+        if ((val.startsWith('"') && val.endsWith('"')) ||
+            (val.startsWith("'") && val.endsWith("'"))) val = val.slice(1, -1);
+        if (key && !(key in process.env)) { process.env[key] = val; loaded++; }
+      }
+      if (loaded > 0) break;
+    } catch { /* 파일 없음 */ }
+  }
+}());
+
 // ── CLI ───────────────────────────────────────────────────────────────────────
 const args = Object.fromEntries(
   process.argv.slice(2)
@@ -694,32 +718,53 @@ function validateAiBody(text) {
   return true;
 }
 
-// ── 마크다운 조립 (async: Z.ai 우선, 실패 시 템플릿 폴백) ─────────────────────
+// ── 마크다운 조립 (async: Z.ai 필수, top5-list만 템플릿) ─────────────────────
 (async () => {
+  // ZAI_API_KEY 확인 — 없으면 즉시 중단 (템플릿 폴백 없음)
+  if (!isTop5List && !process.env.ZAI_API_KEY) {
+    console.error('\n[오류] ZAI_API_KEY가 설정되지 않았습니다.');
+    console.error('  .env 파일에 ZAI_API_KEY=<키값> 을 추가하세요.');
+    console.error('  AI 없이 템플릿으로 발행하면 동일한 구조의 글이 반복될 수 있습니다.');
+    process.exit(1);
+  }
+
   const frontMatter = buildFrontMatter();
   let body;
-  let source = 'template';
+  let source;
 
-  // top5-list는 항상 템플릿 사용 (Z.ai 불필요)
+  // top5-list는 템플릿 사용 (구조화 데이터 나열형, AI 불필요)
   if (isTop5List) {
     body   = buildTop5ListBody();
     source = 'template(top5-list)';
   } else {
-    try {
-      const zai    = require('../lib/zai-client');
-      const aiBody = await zai.generateHotelDraft(brief);
-      if (validateAiBody(aiBody)) {
-        body   = aiBody;
-        source = 'z.ai';
-      } else {
-        console.error('  ⚠  Z.ai 응답 검증 실패 → 템플릿 폴백');
-        body = buildTemplateBody();
+    const zai = require('../lib/zai-client');
+
+    // 1차 시도
+    let aiBody = null;
+    let lastErr = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        console.log(`  Z.ai 글 생성 중... (${attempt}차 시도)`);
+        aiBody = await zai.generateHotelDraft(brief);
+        if (validateAiBody(aiBody)) break;
+        console.warn(`  ⚠  Z.ai 응답 검증 미달 (${attempt}차) — 재시도`);
+        aiBody = null;
+      } catch (err) {
+        lastErr = err;
+        console.warn(`  ⚠  Z.ai 오류 (${attempt}차): ${err.message.slice(0, 80)}`);
+        if (attempt < 2) await new Promise(r => setTimeout(r, 3000));
       }
-    } catch (err) {
-      const reason = process.env.ZAI_API_KEY ? err.message : 'ZAI_API_KEY 없음';
-      console.error(`  ⚠  Z.ai 건너뜀 (${reason}) → 템플릿 폴백`);
-      body = buildTemplateBody();
     }
+
+    if (!aiBody) {
+      console.error('\n[오류] Z.ai 글 생성 실패. 발행을 중단합니다.');
+      if (lastErr) console.error(`  원인: ${lastErr.message}`);
+      console.error('  → 잠시 후 재시도하거나 ZAI_API_KEY를 확인하세요.');
+      process.exit(1);
+    }
+
+    body   = aiBody;
+    source = 'z.ai';
   }
 
   const markdown = frontMatter + '\n' + body;
