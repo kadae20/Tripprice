@@ -41,6 +41,7 @@ const readline         = require('readline');
 const { execFileSync } = require('child_process');
 
 const ROOT          = path.resolve(__dirname, '..');
+const ENV_FILE      = path.join(ROOT, '.env.local');
 const HOTELDATA_DIR = path.join(ROOT, process.env.HOTELDATA_DIR || 'downloads/agoda/hoteldata');
 const LATEST_CSV    = path.join(ROOT, 'data', 'hotels', 'hotels-latest.csv');
 const SUBSET_CSV    = path.join(ROOT, 'data', 'hotels', 'hotels-subset.csv');
@@ -371,22 +372,65 @@ function runIngest(csvPath) {
   console.log(`  모드     : ${DRY_RUN ? 'dry-run (다운로드 없음)' : '실행'}`);
   console.log('');
 
-  // ── AGODA_HOTELDATA_URL 필수 확인 ────────────────────────────────────────
+  // ── AGODA_HOTELDATA_URL 없으면 파트너 허브 자동 로그인으로 URL 추출 ──────
   if (!hotelDataUrl) {
+    const hasCredentials = process.env.AGODA_PARTNER_EMAIL && process.env.AGODA_PARTNER_PASSWORD;
+    if (hasCredentials) {
+      console.log('  AGODA_HOTELDATA_URL 없음 → 파트너 허브 자동 로그인으로 URL 추출 시도...');
+      const { spawnSync } = require('child_process');
+      const fetchResult = spawnSync(
+        process.execPath,
+        [path.join(__dirname, 'agoda-partner-fetch-url.js'), ...(DRY_RUN ? ['--dry-run'] : [])],
+        { encoding: 'utf8', env: process.env, cwd: ROOT, timeout: 90_000 }
+      );
+      if (fetchResult.stdout) process.stdout.write(fetchResult.stdout);
+      if (fetchResult.stderr) process.stderr.write(fetchResult.stderr);
+
+      if (fetchResult.status === 0 && !DRY_RUN) {
+        // .env.local 갱신 후 환경변수 재로드
+        const envLines = fs.existsSync(ENV_FILE)
+          ? fs.readFileSync(ENV_FILE, 'utf8').split('\n') : [];
+        for (const l of envLines) {
+          const t = l.trim();
+          if (!t || t.startsWith('#')) continue;
+          const eq = t.indexOf('=');
+          if (eq < 1) continue;
+          const k = t.slice(0, eq).trim();
+          if (k === 'AGODA_HOTELDATA_URL') {
+            let v = t.slice(eq + 1).trim();
+            if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+            process.env.AGODA_HOTELDATA_URL = v;
+            console.log(`  ✅ AGODA_HOTELDATA_URL 자동 갱신 완료`);
+            break;
+          }
+        }
+        // hotelDataUrl 재할당
+        const refreshedUrl = (process.env.AGODA_HOTELDATA_URL || '').trim();
+        if (refreshedUrl) {
+          // 재시작 없이 계속 진행 (변수 재사용을 위해 재귀 대신 continue 활용)
+          console.log('  → 갱신된 URL로 계속 진행...');
+          // URL을 hotelDataUrl 변수에 재할당하기 위해 전체 플로우를 재실행
+          const { status } = spawnSync(process.execPath, [__filename, ...process.argv.slice(2)],
+            { encoding: 'utf8', env: process.env, cwd: ROOT, stdio: 'inherit' });
+          process.exit(status ?? 0);
+        }
+      }
+    }
+
+    // 자동 추출도 실패 or 자격증명 없음
     const guide = [
       'AGODA_HOTELDATA_URL이 설정되지 않았습니다.',
       '',
-      '설정 방법:',
-      '  1) Agoda 파트너 허브 접속: https://partners.agoda.com/tools/hotelData',
+      '수동 설정 방법:',
+      '  1) https://partners.agoda.com/tools/hotelData 접속',
       '  2) "Download Hotel Data" 버튼 우클릭 → "링크 주소 복사"',
-      '  3) .env.local에 추가:',
-      '     AGODA_HOTELDATA_URL=https://xml.agoda.com/hoteldatafiles/...zip?token=...',
+      '  3) .env.local에 추가: AGODA_HOTELDATA_URL=https://xml.agoda.com/hoteldatafiles/...zip',
       '',
-      '⚠  URL은 수 주 후 만료됩니다. 만료 시 재설정이 필요합니다.',
+      '또는 자동 추출: AGODA_PARTNER_EMAIL / AGODA_PARTNER_PASSWORD 설정 후 재실행',
     ].join('\n');
     console.error(guide);
     writeFailLog('AGODA_HOTELDATA_URL 미설정');
-    await notifyTelegram('⚠ Tripprice hoteldata-sync: AGODA_HOTELDATA_URL 미설정 — 파트너 허브에서 URL 갱신 후 .env.local 업데이트 필요');
+    await notifyTelegram('⚠ tripprice.net hoteldata-sync: AGODA_HOTELDATA_URL 미설정 — 파트너 허브 자격증명 확인 필요');
     process.exit(1);
   }
 
@@ -502,6 +546,6 @@ function runIngest(csvPath) {
 })().catch(async err => {
   console.error(`\n실패: ${err.message}`);
   writeFailLog(err.message);
-  await notifyTelegram(`⚠ Tripprice hoteldata-sync 실패: ${err.message.slice(0, 300)}`);
+  await notifyTelegram(`⚠ tripprice.net 데이터 동기화 실패\n${err.message.slice(0, 250)}`);
   process.exit(1);
 });

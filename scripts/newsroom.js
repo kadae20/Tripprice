@@ -359,10 +359,13 @@ async function runDaily() {
   console.log(divider);
 
   // ── Telegram 알림 ──────────────────────────────────────────────────────────
+  const failedJobs = log.jobs.filter(j => ['pipeline-failed','rejected','publish-failed','slug-parse-failed'].includes(j.status));
   const msg = [
-    `[Tripprice 편집국] ${today} 일일 실행 완료`,
-    `총 ${log.summary.total}건 | 승인 ${log.summary.approved} | 발행 ${log.summary.published} | 실패 ${log.summary.failed}`,
-    log.jobs.filter(j => j.status === 'rejected').map(j => `거부: ${j.slug || j.label}`).join('\n'),
+    `🏨 tripprice.net 편집국 — ${today}`,
+    `총 ${log.summary.total}건 | ✅ 발행 ${log.summary.published} | ❌ 실패 ${log.summary.failed}`,
+    failedJobs.length > 0
+      ? `실패 원인:\n${failedJobs.slice(0,5).map(j => `  • ${j.slug || j.label}: ${j.status}`).join('\n')}`
+      : '',
   ].filter(Boolean).join('\n');
   sendTelegramIfConfigured(msg);
 }

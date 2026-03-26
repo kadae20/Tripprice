@@ -528,6 +528,14 @@ async function main() {
     console.log(`  도시   : ${CITIES.join(', ')} → 정규화: ${[...targetCities].join(', ')}`);
   }
 
+  // ── 기존 subset 백업 (쿨다운 복원용) ────────────────────────────────────────
+  const backupPath = OUTPUT_CSV + '.prev';
+  const hasExistingSubset = fs.existsSync(OUTPUT_CSV) &&
+    fs.statSync(OUTPUT_CSV).size > 1024; // 헤더만인 빈 파일은 백업 안 함
+  if (hasExistingSubset) {
+    try { fs.copyFileSync(OUTPUT_CSV, backupPath); } catch { /* 백업 실패는 무시 */ }
+  }
+
   // ── 추출 패스 ─────────────────────────────────────────────────────────────
   const stats = await extractPass(targetCities, targetsRaw, allowedIds, rotationState);
   process.stdout.write('\n');
@@ -557,6 +565,25 @@ async function main() {
   console.log('══════════════════════════════════════════════════');
 
   if (totalWritten === 0) {
+    // ── 쿨다운에 의한 0행 vs 진짜 도시 불일치 구분 ───────────────────────────
+    // 쿨다운 적용 중인 호텔이 많으면 → 기존 subset.csv 재사용 (비치명적)
+    const onCooldownCount = rotationState
+      ? Object.keys(rotationState).filter(id => isOnCooldown(id, rotationState)).length
+      : 0;
+
+    if (onCooldownCount > 0 && fs.existsSync(backupPath)) {
+      const backupKB = (fs.statSync(backupPath).size / 1024).toFixed(0);
+      // 빈 파일을 백업으로 덮어쓰기 (이전 데이터 복원)
+      try { fs.copyFileSync(backupPath, OUTPUT_CSV); } catch { /* 복원 실패는 무시 */ }
+      const restoredKB = fs.existsSync(OUTPUT_CSV) ? (fs.statSync(OUTPUT_CSV).size / 1024).toFixed(0) : 0;
+      console.warn(`\n  ⚠  추출 결과 0행 — 전체 ${onCooldownCount}개 호텔이 rotation 쿨다운 중`);
+      console.warn(`  → 이전 subset.csv 복원 (${restoredKB}KB) — 기존 데이터로 계속 운영`);
+      console.warn(`  → 쿨다운 해제 방법: ROTATION_COOLDOWN_DAYS=0 환경변수 또는 --force 옵션`);
+      console.warn(`  → 다음 정상 갱신 예상: ${COOLDOWN_DAYS}일 후`);
+      // 비치명적 — 이전 파일 복원, 성공으로 종료
+      return;
+    }
+
     console.warn('\n  ⚠  추출 결과가 0행입니다.');
     if (EXTRACT_MODE === 'city') {
       console.warn(`  → HOTELDATA_CITIES="${CITIES.join(',')}" 와 실제 CSV 도시 값을 비교하세요`);
