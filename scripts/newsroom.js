@@ -81,7 +81,8 @@ const mode        = positional[0];
 const autoPublish = flags['auto-publish'] === true;
 const dryRun      = flags['dry-run']      === true;
 const concurrency = Math.min(Math.max(parseInt(flags.concurrency || '3', 10), 1), 5);
-const today       = new Date().toISOString().split('T')[0];
+// KST(UTC+9) 기준 날짜 사용 — UTC 기반이면 새벽 시간대에 하루 전 날짜가 뜨는 버그 방지
+const today       = new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().split('T')[0];
 
 if (!mode || !['daily', 'monthly'].includes(mode)) {
   console.error('사용법: node scripts/newsroom.js <daily|monthly> [옵션]');
@@ -168,6 +169,26 @@ async function runDaily() {
     summary: { total: jobs.length, approved: 0, published: 0, failed: 0 },
   };
 
+  // ── ZAI API 사전 헬스체크 (실패 시 즉시 중단, 48개 job 모두 실패 방지) ────
+  if (!dryRun && process.env.ZAI_API_KEY) {
+    try {
+      const zai = require('../lib/zai-client');
+      const zaiOk = await zai.health();
+      if (!zaiOk) {
+        const errMsg = `⚠️ tripprice.net 편집국 중단\nZAI API 응답 없음 — 전체 ${jobs.length}건 실행 취소\n(ZAI_API_KEY 확인 또는 잠시 후 재시도)`;
+        console.error('\n  ❌ ZAI API 헬스체크 실패 — 전체 job 취소\n');
+        sendTelegramIfConfigured(errMsg);
+        return;
+      }
+      console.log('  ✅ ZAI API 응답 확인');
+    } catch (e) {
+      const errMsg = `⚠️ tripprice.net 편집국 중단\nZAI API 오류: ${e.message.slice(0, 100)}\n전체 ${jobs.length}건 실행 취소`;
+      console.error(`\n  ❌ ZAI API 체크 오류: ${e.message}\n`);
+      sendTelegramIfConfigured(errMsg);
+      return;
+    }
+  }
+
   // ── ENRICH_LITE: 발행 전 상위 후보 OSM 보강 (선택) ──────────────────────
   if (process.env.ENRICH_LITE === '1' && !dryRun) {
     const ENRICH_MAX = Math.min(parseInt(process.env.ENRICH_MAX || '80', 10), 500);
@@ -218,7 +239,12 @@ async function runDaily() {
       if (!pipeResult.ok) {
         jobLog.status = 'pipeline-failed';
         log.summary.failed++;
-        console.log(`  [${idx + 1}] FAIL: pipeline — ${label}`);
+        // 오류 원인 1줄 추출 (ZAI_API_KEY 누락 등 핵심 메시지)
+        const errText = (pipeResult.stderr + '\n' + pipeResult.stdout)
+          .split('\n').map(l => l.trim()).filter(l => l.startsWith('[오류]') || l.startsWith('Error:') || l.startsWith('error:'))
+          .map(l => l.slice(0, 80))[0] || '';
+        jobLog.failReason = errText || null;
+        console.log(`  [${idx + 1}] FAIL: pipeline — ${label}${errText ? ' | ' + errText : ''}`);
         // rotation: 실패 기록
         const rotSt2 = rotation.load();
         rotation.markOutcome(rotKey, rotSt2, { success: false, failure_reason: 'pipeline-failed' });
@@ -360,11 +386,16 @@ async function runDaily() {
 
   // ── Telegram 알림 ──────────────────────────────────────────────────────────
   const failedJobs = log.jobs.filter(j => ['pipeline-failed','rejected','publish-failed','slug-parse-failed'].includes(j.status));
+  // pipeline-failed 공통 원인 추출 (같은 오류가 반복되면 1줄로 요약)
+  const pipelineFailReasons = [...new Set(failedJobs.filter(j => j.failReason).map(j => j.failReason))];
   const msg = [
     `🏨 tripprice.net 편집국 — ${today}`,
     `총 ${log.summary.total}건 | ✅ 발행 ${log.summary.published} | ❌ 실패 ${log.summary.failed}`,
     failedJobs.length > 0
       ? `실패 원인:\n${failedJobs.slice(0,5).map(j => `  • ${j.slug || j.label}: ${j.status}`).join('\n')}`
+      : '',
+    pipelineFailReasons.length > 0
+      ? `오류 상세: ${pipelineFailReasons.slice(0, 2).join(' / ')}`
       : '',
   ].filter(Boolean).join('\n');
   sendTelegramIfConfigured(msg);

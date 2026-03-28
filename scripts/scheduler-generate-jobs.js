@@ -64,7 +64,7 @@ const LIST_CITY_MAX  = Math.min(parseInt(process.env.LIST_CITY_MAX  || '3',  10)
 const THEME          = process.env.THEME || args.theme || 'family';
 const DRY_RUN  = args['dry-run'] === true;
 const OUT_PATH = path.resolve(ROOT, args.out || 'config/daily-jobs.json');
-const today    = new Date().toISOString().split('T')[0];
+const today    = new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().split('T')[0]; // KST
 
 // ── 경로 상수 ─────────────────────────────────────────────────────────────────
 const TRIPPRICE_CSV  = path.join(ROOT, 'data', 'hotels', 'tripprice-hotels.csv');
