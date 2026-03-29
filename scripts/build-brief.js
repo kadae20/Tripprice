@@ -95,19 +95,43 @@ if (hotels.length === 0) {
 const THEME_LABEL_KO = { rating: '평점높은', reviews: '리뷰많은', stars: '성급높은',
                           photos: '사진많은', checkin: '체크인빠른', city: '추천' };
 
+// 한글 도시명 → 영문 slug 매핑
+const CITY_EN_SLUG = {
+  '서울': 'seoul', '부산': 'busan', '제주': 'jeju', '인천': 'incheon',
+  '대구': 'daegu', '광주': 'gwangju', '대전': 'daejeon', '울산': 'ulsan',
+  '수원': 'suwon', '강릉': 'gangneung', '경주': 'gyeongju',
+};
+// 영문 테마명 매핑 (top5-list용)
+const THEME_EN_SLUG = {
+  rating: 'top-rated', reviews: 'popular', stars: 'luxury',
+  family: 'family', photos: 'scenic', checkin: 'easy-checkin', city: 'recommended',
+};
+// slug 정제: 특수문자 제거, 소문자+하이픈만 허용
+function toSlugPart(str) {
+  return String(str)
+    .toLowerCase()
+    .replace(/&/g, 'and')
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+function citySlug(city) {
+  return CITY_EN_SLUG[city] || toSlugPart(city) || 'hotel';
+}
+
 function buildSlug(hotels, lang, postType, theme) {
   if (postType === 'top5-list') {
-    const city  = hotels[0].city || 'hotel';
-    const label = THEME_LABEL_KO[theme] || theme;
+    const city  = citySlug(hotels[0].city || 'hotel');
+    const label = THEME_EN_SLUG[theme] || toSlugPart(theme) || 'recommended';
     return `${city}-${label}-hotel-top5`;
   }
   if (hotels.length === 1) {
     const h = hotels[0];
-    const name = (h.hotel_name_en || h.hotel_id).toLowerCase().replace(/\s+/g, '-');
+    const name = toSlugPart(h.hotel_name_en || h.hotel_id);
     return `${name}-review`;
   }
-  const city = hotels[0].city || 'hotel';
-  const category = hotels[0].hotel_category || 'guide';
+  const city     = citySlug(hotels[0].city || 'hotel');
+  const category = toSlugPart(hotels[0].hotel_category || 'guide');
   return `${city}-${category}-comparison`;
 }
 
