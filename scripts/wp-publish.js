@@ -148,146 +148,88 @@ function loadEnv() {
 function markdownToHTML(md) {
   if (!md || typeof md !== 'string') return '';
 
-  const lines = md.split('\n');
-  const output = [];
-  let inList = false;
-  let inBlockquote = false;
-  let paragraphBuf = [];
-
-  function flushParagraph() {
-    if (paragraphBuf.length > 0) {
-      const text = paragraphBuf.join(' ').trim();
-      if (text) output.push(`<p>${inlineFormat(text)}</p>`);
-      paragraphBuf = [];
-    }
-  }
-
-  function flushList() {
-    if (inList) {
-      output.push('</ul>');
-      inList = false;
-    }
-  }
-
-  function flushBlockquote() {
-    if (inBlockquote) {
-      output.push('</blockquote>');
-      inBlockquote = false;
-    }
-  }
-
   function inlineFormat(text) {
     return text
-      // 코드 (인라인)
       .replace(/`([^`]+)`/g, '<code>$1</code>')
-      // Bold + Italic
       .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
-      // Bold
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-      // Italic
       .replace(/\*(.+?)\*/g, '<em>$1</em>')
-      // 링크 (외부/제휴 링크: target=_blank + rel + UTM 자동 삽입 — oEmbed 임베드/iframe 차단)
-      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, href) => {
-        if (!/^https?:\/\//.test(href)) return `<a href="${href}">${text}</a>`;
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, linkText, href) => {
+        if (!/^https?:\/\//.test(href)) return `<a href="${href}">${linkText}</a>`;
         const isAffiliate = /agoda\.com|booking\.com/.test(href);
         let finalHref = href;
-        // 제휴 링크에 UTM 파라미터 자동 주입 (이미 있으면 스킵)
         if (isAffiliate && !href.includes('utm_source')) {
           const sep = href.includes('?') ? '&' : '?';
           finalHref = `${href}${sep}utm_source=tripprice&utm_medium=referral&utm_campaign=hotel_review`;
         }
         const rel = isAffiliate ? 'nofollow sponsored noopener noreferrer' : 'noopener noreferrer';
-        return `<a href="${finalHref}" target="_blank" rel="${rel}">${text}</a>`;
+        return `<a href="${finalHref}" target="_blank" rel="${rel}">${linkText}</a>`;
       });
   }
 
-  for (const rawLine of lines) {
-    const line = rawLine;
-    const trimmed = line.trim();
+  // Gutenberg 블록 형식으로 변환
+  const lines  = md.split('\n');
+  const blocks = [];
+  let ulBuf    = [];
+  let olBuf    = [];
 
-    // 빈 줄 — 진행 중인 블록 마무리
-    if (trimmed === '') {
-      flushParagraph();
-      flushList();
-      flushBlockquote();
-      continue;
-    }
-
-    // 헤딩
-    const h3 = trimmed.match(/^### (.+)/);
-    const h2 = trimmed.match(/^## (.+)/);
-    const h1 = trimmed.match(/^# (.+)/);
-
-    if (h1) {
-      flushParagraph(); flushList(); flushBlockquote();
-      output.push(`<h1>${inlineFormat(h1[1])}</h1>`);
-      continue;
-    }
-    if (h2) {
-      flushParagraph(); flushList(); flushBlockquote();
-      output.push(`<h2>${inlineFormat(h2[1])}</h2>`);
-      continue;
-    }
-    if (h3) {
-      flushParagraph(); flushList(); flushBlockquote();
-      output.push(`<h3>${inlineFormat(h3[1])}</h3>`);
-      continue;
-    }
-
-    // 수평선
-    if (/^---+$/.test(trimmed) || /^\*\*\*+$/.test(trimmed)) {
-      flushParagraph(); flushList(); flushBlockquote();
-      output.push('<hr>');
-      continue;
-    }
-
-    // 비정렬 목록 (-, *, +)
-    const listMatch = trimmed.match(/^[-*+] (.+)/);
-    if (listMatch) {
-      flushParagraph(); flushBlockquote();
-      if (!inList) {
-        output.push('<ul>');
-        inList = true;
-      }
-      output.push(`<li>${inlineFormat(listMatch[1])}</li>`);
-      continue;
-    }
-
-    // 순서 목록
-    const olMatch = trimmed.match(/^\d+\. (.+)/);
-    if (olMatch) {
-      flushParagraph(); flushBlockquote();
-      if (!inList) {
-        output.push('<ol>');
-        inList = true;
-      }
-      output.push(`<li>${inlineFormat(olMatch[1])}</li>`);
-      continue;
-    }
-
-    // Blockquote
-    const bqMatch = trimmed.match(/^> (.+)/);
-    if (bqMatch) {
-      flushParagraph(); flushList();
-      if (!inBlockquote) {
-        output.push('<blockquote>');
-        inBlockquote = true;
-      }
-      output.push(`<p>${inlineFormat(bqMatch[1])}</p>`);
-      continue;
-    }
-
-    // 일반 텍스트 — 단락 버퍼에 누적
-    flushList(); flushBlockquote();
-    paragraphBuf.push(trimmed);
+  function flushUl() {
+    if (!ulBuf.length) return;
+    const items = ulBuf.map(l => `<li>${inlineFormat(l)}</li>`).join('');
+    blocks.push(`<!-- wp:list -->\n<ul class="wp-block-list">${items}</ul>\n<!-- /wp:list -->`);
+    ulBuf = [];
   }
+  function flushOl() {
+    if (!olBuf.length) return;
+    const items = olBuf.map(l => `<li>${inlineFormat(l)}</li>`).join('');
+    blocks.push(`<!-- wp:list {"ordered":true} -->\n<ol class="wp-block-list">${items}</ol>\n<!-- /wp:list -->`);
+    olBuf = [];
+  }
+  function flushLists() { flushUl(); flushOl(); }
 
-  // 나머지 플러시
-  flushParagraph();
-  flushList();
-  flushBlockquote();
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
 
-  return output.join('\n');
+    if (trimmed === '') { flushLists(); continue; }
+
+    const h4m = trimmed.match(/^#### (.+)/);
+    const h3m = trimmed.match(/^### (.+)/);
+    const h2m = trimmed.match(/^## (.+)/);
+    const h1m = trimmed.match(/^# (.+)/);
+
+    if (h1m) {
+      flushLists();
+      blocks.push(`<!-- wp:heading {"level":1} -->\n<h1 class="wp-block-heading">${inlineFormat(h1m[1])}</h1>\n<!-- /wp:heading -->`);
+    } else if (h2m) {
+      flushLists();
+      blocks.push(`<!-- wp:heading {"level":2} -->\n<h2 class="wp-block-heading">${inlineFormat(h2m[1])}</h2>\n<!-- /wp:heading -->`);
+    } else if (h3m) {
+      flushLists();
+      blocks.push(`<!-- wp:heading {"level":3} -->\n<h3 class="wp-block-heading">${inlineFormat(h3m[1])}</h3>\n<!-- /wp:heading -->`);
+    } else if (h4m) {
+      flushLists();
+      blocks.push(`<!-- wp:heading {"level":4} -->\n<h4 class="wp-block-heading">${inlineFormat(h4m[1])}</h4>\n<!-- /wp:heading -->`);
+    } else if (/^---+$/.test(trimmed) || /^\*\*\*+$/.test(trimmed)) {
+      flushLists();
+      blocks.push(`<!-- wp:separator -->\n<hr class="wp-block-separator has-alpha-channel-opacity"/>\n<!-- /wp:separator -->`);
+    } else if (trimmed.match(/^[-*+] (.+)/)) {
+      flushOl();
+      ulBuf.push(trimmed.replace(/^[-*+] /, ''));
+    } else if (trimmed.match(/^\d+\. (.+)/)) {
+      flushUl();
+      olBuf.push(trimmed.replace(/^\d+\. /, ''));
+    } else if (trimmed.match(/^> (.+)/)) {
+      flushLists();
+      const t = inlineFormat(trimmed.replace(/^> /, ''));
+      blocks.push(`<!-- wp:quote -->\n<blockquote class="wp-block-quote"><p>${t}</p></blockquote>\n<!-- /wp:quote -->`);
+    } else {
+      flushLists();
+      blocks.push(`<!-- wp:paragraph -->\n<p>${inlineFormat(trimmed)}</p>\n<!-- /wp:paragraph -->`);
+    }
+  }
+  flushLists();
+
+  return blocks.join('\n\n');
 }
 
 // ──────────────────────────────────────────────
