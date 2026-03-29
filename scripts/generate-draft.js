@@ -205,7 +205,8 @@ function buildYoastMetaDesc(focusKeyphrase) {
 
   // 120자 미달 시 가격 정보 추가
   if (desc.length < 120) {
-    const priceMin = Math.min(...hotels.map(h => h.price_min).filter(Boolean));
+    const _prices = hotels.map(h => h.price_min).filter(n => n && n > 0 && isFinite(n));
+    const priceMin = _prices.length ? Math.min(..._prices) : null;
     if (priceMin) desc += ` ${(priceMin / 10000).toFixed(0)}만원대부터 예약 가능.`;
   }
 
