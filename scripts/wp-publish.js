@@ -310,19 +310,29 @@ async function uploadMediaFromFile(localPath, { WP_URL, authHeader }, altText) {
 
   const endpoint = `${WP_URL}/wp-json/wp/v2/media`;
   let uploadResponse;
-  try {
-    uploadResponse = await fetch(endpoint, {
-      method:  'POST',
-      headers: {
-        'Authorization':       authHeader,
-        'Content-Type':        contentType,
-        'Content-Disposition': `attachment; filename="${filename}"`,
-      },
-      body: buffer,
-    });
-  } catch (err) {
-    console.warn(`  ⚠  미디어 업로드 API 오류 (featured_media 건너뜀): ${err.message}`);
-    return null;
+  // 429 Too Many Requests 대비 재시도 (최대 3회, 지수 백오프)
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      uploadResponse = await fetch(endpoint, {
+        method:  'POST',
+        headers: {
+          'Authorization':       authHeader,
+          'Content-Type':        contentType,
+          'Content-Disposition': `attachment; filename="${filename}"`,
+        },
+        body: buffer,
+      });
+    } catch (err) {
+      console.warn(`  ⚠  미디어 업로드 API 오류 (featured_media 건너뜀): ${err.message}`);
+      return null;
+    }
+    if (uploadResponse.status === 429) {
+      const wait = attempt * 4000;
+      console.warn(`  ⚠  미디어 업로드 429 — ${wait/1000}초 후 재시도 (${attempt}/3)`);
+      await new Promise(r => setTimeout(r, wait));
+      continue;
+    }
+    break;
   }
 
   if (!uploadResponse.ok) {
@@ -372,22 +382,31 @@ async function uploadMediaFromUrl(imageUrl, { WP_URL, authHeader }, altText) {
   const contentType = imgResponse.headers.get('content-type') || 'image/jpeg';
   const filename = imageUrl.split('/').pop().split('?')[0] || 'featured-image.jpg';
 
-  // 2) WP 미디어 업로드
+  // 2) WP 미디어 업로드 (429 재시도 포함)
   const endpoint = `${WP_URL}/wp-json/wp/v2/media`;
   let uploadResponse;
-  try {
-    uploadResponse = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Authorization':        authHeader,
-        'Content-Type':         contentType,
-        'Content-Disposition':  `attachment; filename="${filename}"`,
-      },
-      body: buffer,
-    });
-  } catch (err) {
-    console.warn(`  ⚠  미디어 업로드 API 오류 (featured_media 건너뜀): ${err.message}`);
-    return null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      uploadResponse = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Authorization':        authHeader,
+          'Content-Type':         contentType,
+          'Content-Disposition':  `attachment; filename="${filename}"`,
+        },
+        body: buffer,
+      });
+    } catch (err) {
+      console.warn(`  ⚠  미디어 업로드 API 오류 (featured_media 건너뜀): ${err.message}`);
+      return null;
+    }
+    if (uploadResponse.status === 429) {
+      const wait = attempt * 4000;
+      console.warn(`  ⚠  미디어 업로드 429 — ${wait/1000}초 후 재시도 (${attempt}/3)`);
+      await new Promise(r => setTimeout(r, wait));
+      continue;
+    }
+    break;
   }
 
   if (!uploadResponse.ok) {
