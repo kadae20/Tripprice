@@ -36,26 +36,65 @@ function parseFrontMatter(text) {
 }
 
 /**
- * 마크다운 → 최소 HTML 변환 (외부 패키지 없음).
+ * 인라인 마크다운 → HTML (bold, italic, code, link).
  */
-function minimalMdToHtml(md) {
-  return md
-    .split('\n')
-    .map(line => {
-      if (/^### (.+)/.test(line)) return line.replace(/^### (.+)/, '<h3>$1</h3>');
-      if (/^## (.+)/.test(line))  return line.replace(/^## (.+)/, '<h2>$1</h2>');
-      if (/^# (.+)/.test(line))   return line.replace(/^# (.+)/, '<h1>$1</h1>');
-      if (/^> (.+)/.test(line))   return line.replace(/^> (.+)/, '<blockquote>$1</blockquote>');
-      if (/^- (.+)/.test(line))   return line.replace(/^- (.+)/, '<li>$1</li>');
-      if (/^---$/.test(line))     return '<hr>';
-      if (line.trim() === '')     return '';
-      return `<p>${line}</p>`;
-    })
-    .join('\n')
+function inlineMd(text) {
+  return text
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     .replace(/\*(.+?)\*/g,     '<em>$1</em>')
     .replace(/`(.+?)`/g,       '<code>$1</code>')
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+}
+
+/**
+ * 마크다운 → Gutenberg 블록 HTML 변환.
+ * Yoast SEO가 블록 에디터에서 분석하려면 <!-- wp:* --> 블록 마크업이 필요.
+ */
+function minimalMdToHtml(md) {
+  const lines  = md.split('\n');
+  const blocks = [];
+  let listBuf  = [];
+
+  function flushList() {
+    if (listBuf.length === 0) return;
+    const items = listBuf.map(l => `<li>${inlineMd(l)}</li>`).join('');
+    blocks.push(`<!-- wp:list -->\n<ul>${items}</ul>\n<!-- /wp:list -->`);
+    listBuf = [];
+  }
+
+  for (const raw of lines) {
+    const line = raw;
+
+    if (/^### (.+)/.test(line)) {
+      flushList();
+      const t = inlineMd(line.replace(/^### /, ''));
+      blocks.push(`<!-- wp:heading {"level":3} -->\n<h3 class="wp-block-heading">${t}</h3>\n<!-- /wp:heading -->`);
+    } else if (/^## (.+)/.test(line)) {
+      flushList();
+      const t = inlineMd(line.replace(/^## /, ''));
+      blocks.push(`<!-- wp:heading {"level":2} -->\n<h2 class="wp-block-heading">${t}</h2>\n<!-- /wp:heading -->`);
+    } else if (/^# (.+)/.test(line)) {
+      flushList();
+      const t = inlineMd(line.replace(/^# /, ''));
+      blocks.push(`<!-- wp:heading {"level":1} -->\n<h1 class="wp-block-heading">${t}</h1>\n<!-- /wp:heading -->`);
+    } else if (/^> (.+)/.test(line)) {
+      flushList();
+      const t = inlineMd(line.replace(/^> /, ''));
+      blocks.push(`<!-- wp:quote -->\n<blockquote class="wp-block-quote"><p>${t}</p></blockquote>\n<!-- /wp:quote -->`);
+    } else if (/^- (.+)/.test(line)) {
+      listBuf.push(line.replace(/^- /, ''));
+    } else if (/^---$/.test(line)) {
+      flushList();
+      blocks.push(`<!-- wp:separator -->\n<hr class="wp-block-separator"/>\n<!-- /wp:separator -->`);
+    } else if (line.trim() === '') {
+      flushList();
+    } else {
+      flushList();
+      blocks.push(`<!-- wp:paragraph -->\n<p>${inlineMd(line)}</p>\n<!-- /wp:paragraph -->`);
+    }
+  }
+  flushList();
+  return blocks.join('\n\n');
 }
 
 /**
