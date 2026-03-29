@@ -604,7 +604,8 @@ if (require.main === module) (async () => {
   const refreshJobs = [];
   for (const rec of published) {
     if (refreshJobs.length >= REF_COUNT) break;
-    const slugHotels = (rec.slug || '').split('-').filter((_, i, arr) => i < arr.length - 3);
+    // slug 형식: {hotel_id}-review-{YYYY}-{MM}-{DD} → 마지막 4개 제거해야 hotel_id만 남음
+    const slugHotels = (rec.slug || '').split('-').filter((_, i, arr) => i < arr.length - 4);
     if (slugHotels.length === 0) continue;
     refreshJobs.push({
       hotels:        slugHotels.join('-'),
