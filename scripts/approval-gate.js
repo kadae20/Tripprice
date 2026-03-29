@@ -240,10 +240,11 @@ if (!postJsonPath) {
 } else {
   try {
     postData = JSON.parse(fs.readFileSync(postJsonPath, 'utf8'));
-    const meta = postData.meta || {};
-    if (!((meta.yoast_wpseo_focuskw   || meta.focus_keyphrase  || '').trim())) fail('Yoast focus_keyphrase 없음', 15);
-    if (!((meta.yoast_wpseo_title     || meta.seo_title        || '').trim())) fail('Yoast seo_title 없음', 15);
-    if (!((meta.yoast_wpseo_metadesc  || meta.meta_description || '').trim())) fail('Yoast meta_description 없음', 15);
+    const meta      = postData.meta       || {};
+    const yoastMeta = postData.yoast_meta || {};  // build-wp-post.js 저장 경로
+    if (!((meta.yoast_wpseo_focuskw  || meta.focus_keyphrase  || yoastMeta.focus_keyphrase || '').trim())) fail('Yoast focus_keyphrase 없음', 15);
+    if (!((meta.yoast_wpseo_title    || meta.seo_title        || yoastMeta.seo_title       || '').trim())) fail('Yoast seo_title 없음', 15);
+    if (!((meta.yoast_wpseo_metadesc || meta.meta_description || yoastMeta.meta_description|| '').trim())) fail('Yoast meta_description 없음', 15);
   } catch (e) { fail(`post JSON 파싱 실패: ${e.message}`); }
 }
 
