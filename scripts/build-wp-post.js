@@ -453,6 +453,9 @@ if (require.main === module) {
     // - hotel-section: 각 호텔 H2 직후 2~4장
     content_images: buildContentImages(slug, brief?.hotels || []),
 
+    // 이미지 폴더 매핑용 hotel_ids — wp-publish.js 가 assets/processed/{hotel_id}/ 를 찾는 데 사용
+    hotel_ids: (brief?.hotels || []).map(h => h.hotel_id).filter(Boolean),
+
     categories: inferredCategories,
     tags:       inferredTags,
 

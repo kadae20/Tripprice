@@ -255,10 +255,15 @@ async function resolve(hotelId, draftPath) {
         const photoUrls = [hotelData.photo1, hotelData.photo2, hotelData.photo3, hotelData.photo4, hotelData.photo5].filter(Boolean);
         if (photoUrls.length > 0) {
           console.log(`  → photo1-5 URL ${photoUrls.length}개 발견 → 다운로드+변환 시작`);
+          const prevCount = countLocalImages(outDir);
           const { fetchAndProcess } = require('./fetch-hotel-photos');
           await fetchAndProcess(hotelId, { watermark: false });
-          // 변환 후 재카운트
+          // 변환 후 재카운트 — fetchAndProcess가 저장한 파일도 downloaded에 포함
           idxCounter = countLocalImages(outDir);
+          const newlyFetched = idxCounter - prevCount;
+          if (newlyFetched > 0) {
+            for (let i = 0; i < newlyFetched; i++) downloaded.push(`fetched-${i}`);
+          }
         }
       } catch (err) {
         console.warn(`  ⚠  photo1-5 처리 실패 (계속): ${err.message}`);

@@ -933,7 +933,10 @@ async function main() {
 
   // 5) 대표 이미지 업로드 (featured_media_url → attachment ID)
   // 이미지 없는 경우: assets/processed/{hotel_id}/featured.webp 확인 → resolveHotelImages 실행
-  const hotelIdForImg = normalizeHotelId(data.hotel_id || data.slug || '');
+  // hotel_ids[0] 우선 (build-wp-post.js가 저장), 없으면 hotel_id, 마지막 fallback slug
+  const hotelIdForImg = normalizeHotelId(
+    (Array.isArray(data.hotel_ids) && data.hotel_ids[0]) || data.hotel_id || data.slug || ''
+  );
   let fmuResolved = data.featured_media_url || '';
 
   // 로컬 경로인데 파일이 없거나, URL 자체가 없으면 processed/ 폴더 탐색
