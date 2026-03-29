@@ -7,11 +7,13 @@
  *   mu-plugins는 플러그인 활성화 없이 자동 실행됨.
  *
  * 효과:
- *   _yoast_wpseo_focuskw / _yoast_wpseo_title / _yoast_wpseo_metadesc / _yoast_wpseo_canonical 을
+ *   _yoast_wpseo_focuskw / _yoast_wpseo_title / _yoast_wpseo_metadesc / _yoast_wpseo_canonical
+ *   _yoast_wpseo_linkdex (SEO 점수) / _yoast_wpseo_content_score (가독성 점수) 를
  *   WP REST API meta 필드로 등록 → wp-publish.js가 보내는 값이 실제 저장됨.
+ *   linkdex/content_score 초기값(50)을 API로 주입하면 관리자 목록에서 "사용불가" 대신 주황 표시.
  *
  * 확인:
- *   GET /wp-json/wp/v2/posts/{id}?context=edit 응답의 meta 키 목록에 4개가 나타나면 배포 성공.
+ *   GET /wp-json/wp/v2/posts/{id}?context=edit 응답의 meta 키 목록에 6개가 나타나면 배포 성공.
  */
 
 defined('ABSPATH') || exit;
@@ -19,10 +21,12 @@ defined('ABSPATH') || exit;
 add_action('rest_api_init', static function () {
     // 키별 스키마 및 sanitize 설정
     $meta_config = [
-        '_yoast_wpseo_focuskw'   => ['maxLength' => 100,  'sanitize' => 'sanitize_text_field'],
-        '_yoast_wpseo_title'     => ['maxLength' => 100,  'sanitize' => 'sanitize_text_field'],
-        '_yoast_wpseo_metadesc'  => ['maxLength' => 300,  'sanitize' => 'sanitize_text_field'],
-        '_yoast_wpseo_canonical' => ['maxLength' => 2083, 'sanitize' => 'esc_url_raw'],
+        '_yoast_wpseo_focuskw'      => ['maxLength' => 100,  'sanitize' => 'sanitize_text_field'],
+        '_yoast_wpseo_title'        => ['maxLength' => 100,  'sanitize' => 'sanitize_text_field'],
+        '_yoast_wpseo_metadesc'     => ['maxLength' => 300,  'sanitize' => 'sanitize_text_field'],
+        '_yoast_wpseo_canonical'    => ['maxLength' => 2083, 'sanitize' => 'esc_url_raw'],
+        '_yoast_wpseo_linkdex'      => ['maxLength' => 10,   'sanitize' => 'sanitize_text_field'],  // SEO 점수 (1~100)
+        '_yoast_wpseo_content_score'=> ['maxLength' => 10,   'sanitize' => 'sanitize_text_field'],  // 가독성 점수 (1~100)
     ];
 
     foreach ($meta_config as $key => $cfg) {

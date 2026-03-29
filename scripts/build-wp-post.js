@@ -441,7 +441,7 @@ if (require.main === module) {
     })),
 
     content_markdown: body,
-    ...(args.html ? { content_html: minimalMdToHtml(body) } : {}),
+    content_html: minimalMdToHtml(body),  // 항상 Gutenberg 블록 포맷으로 생성
 
     // URL을 draft JSON에 저장. wp-publish 단계에서 미디어 업로드 후 attachment ID로 교체.
     // WP REST API의 featured_media 필드는 integer ID를 기대하므로 URL을 직접 넣지 않는다.

@@ -620,6 +620,14 @@ function buildPayload(data, { featuredMediaId = null, injectedContentHtml = null
     metaFields._yoast_wpseo_canonical = canonicalUrl;
   }
 
+  // Yoast 점수 초기값 설정 — 관리자 글 목록에서 "사용불가" 대신 색상 표시를 위함.
+  // 실제 점수는 Gutenberg 에디터에서 저장 시 Yoast가 재계산함.
+  // linkdex(SEO) / content_score(가독성): 1~100 범위, 50=보통(주황)
+  if (focusKeyphrase) {
+    metaFields._yoast_wpseo_linkdex = '50';       // 주황(보통) — 에디터에서 저장 시 재계산
+    metaFields._yoast_wpseo_content_score = '50'; // 주황(보통) — 에디터에서 저장 시 재계산
+  }
+
   if (Object.keys(metaFields).length > 0) {
     payload.meta = metaFields;
   }
