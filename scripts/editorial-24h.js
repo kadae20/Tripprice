@@ -1,288 +1,223 @@
 #!/usr/bin/env node
 /**
- * editorial-24h.js — 24/7 편집국 스케줄러
+ * scripts/editorial-24h.js
+ * Tripprice 일일 편집국 — 전체 파이프라인 자동 실행.
  *
- * KST 스케줄에 따라 파이프라인을 자동 실행하고 WordPress에 직접 발행합니다.
+ * 동작:
+ *   1. config/daily-jobs.json 로드 (또는 --hotels 인자)
+ *   2. 각 잡마다 pipeline.js --publish 실행
+ *   3. 발행 완료 후 Telegram 일일 KPI 요약 전송
+ *   4. Notion 월별 KPI 업데이트
  *
- * Usage:
- *   node scripts/editorial-24h.js [--dry-run] [--no-publish] [--max-publish=5]
- *   node scripts/editorial-24h.js --run-now   (즉시 1회 실행 후 스케줄 진입)
+ * 사용법:
+ *   node scripts/editorial-24h.js               # daily-jobs.json 기준 실행
+ *   node scripts/editorial-24h.js --dry-run      # 파이프라인만 실행, WP 발행 제외
+ *   node scripts/editorial-24h.js --run-now      # 시간 게이트 무시하고 즉시 실행
+ *   node scripts/editorial-24h.js --hotels=grand-hyatt-seoul-seoul --lang=ko
+ *   node scripts/editorial-24h.js --max=2        # 최대 2편 발행 후 중단
  *
- * 스케줄 (KST):
- *   06:00 — Agoda 데이터 동기화
- *   08:00 — 편집국 1차 가동 + WP 발행
- *   10:00 — 편집국 2차 가동 + WP 발행
- *   14:00 — 이미지 처리 배치
- *   22:00 — KPI 동기화
- *   23:00 — 내일 큐 사전 준비
+ * 환경변수 (.env.local 자동 로드):
+ *   WP_URL, WP_USER, WP_APP_PASS, ANTHROPIC_API_KEY
+ *   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+ *   NOTION_API_KEY, NOTION_DATABASE_ID
  */
+
 'use strict';
 
-const fs            = require('fs');
-const path          = require('path');
-const { spawnSync } = require('child_process');
+const fs              = require('fs');
+const path            = require('path');
+const { execFileSync } = require('child_process');
 
-const ROOT     = path.resolve(__dirname, '..');
-const LOGS_DIR = path.join(ROOT, 'logs');
+const ROOT    = path.join(__dirname, '..');
+const SCRIPTS = __dirname;
+const NODE    = process.execPath;
 
-const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
-
-// ── CLI 파싱 ──────────────────────────────────────────────────────────────────
-function parseArgs() {
-  const raw = process.argv.slice(2);
-  const obj = {};
-  for (const a of raw) {
-    if (a.startsWith('--')) {
-      const eq = a.indexOf('=');
-      const k  = eq === -1 ? a.slice(2) : a.slice(2, eq);
-      const v  = eq === -1 ? true       : a.slice(eq + 1);
-      obj[k] = v;
-    }
-  }
-  return {
-    dryRun:     !!(obj['dry-run'] || obj.dryrun),
-    noPublish:  !!obj['no-publish'],
-    maxPublish: parseInt(obj['max-publish'] || '5', 10),
-    runNow:     !!obj['run-now'],
-  };
-}
-
-// ── KST 유틸 ─────────────────────────────────────────────────────────────────
-function nowKST()    { return new Date(Date.now() + KST_OFFSET_MS); }
-function kstHHMM()   { const d = nowKST(); return d.getUTCHours() * 100 + d.getUTCMinutes(); }
-function kstDate()   { return nowKST().toISOString().split('T')[0]; }
-function kstTime()   { const d = nowKST(); return `${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')} KST`; }
-
-// ── 로그 ──────────────────────────────────────────────────────────────────────
-function log(msg) { console.log(`[${new Date().toISOString()}][${kstTime()}] ${msg}`); }
-
-// ── .env 로드 ─────────────────────────────────────────────────────────────────
+// ── 환경변수 로드 ─────────────────────────────────────────────────────────────
 function loadEnv() {
   for (const fname of ['.env.local', '.env']) {
     const fp = path.join(ROOT, fname);
-    if (!fs.existsSync(fp)) continue;
     try {
-      let loaded = 0;
-      for (const raw of fs.readFileSync(fp, 'utf8').split('\n')) {
-        const line = raw.trim();
-        if (!line || line.startsWith('#')) continue;
-        const eq = line.indexOf('=');
-        if (eq < 1) continue;
-        const key = line.slice(0, eq).trim();
-        let val   = line.slice(eq + 1).trim();
-        if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) val = val.slice(1, -1);
-        if (key && !(key in process.env)) { process.env[key] = val; loaded++; }
-      }
-      log(`환경변수 로드: ${fname} (${loaded}개)`);
-      return;
-    } catch { /* skip */ }
+      fs.readFileSync(fp, 'utf8').split('\n').forEach(line => {
+        line = line.trim();
+        if (!line || line.startsWith('#')) return;
+        const idx = line.indexOf('='); if (idx < 1) return;
+        const k = line.slice(0, idx).trim();
+        let v = line.slice(idx + 1).trim();
+        if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1,-1);
+        if (k && !(k in process.env)) process.env[k] = v;
+      });
+      break;
+    } catch { /* 파일 없으면 스킵 */ }
+  }
+}
+loadEnv();
+
+// 알림 + KPI (lib 로드는 env 로드 이후)
+const notify    = require('../lib/notify');
+const notionKpi = require('../lib/notion-kpi');
+
+// ── CLI 파싱 ──────────────────────────────────────────────────────────────────
+const cliArgs = process.argv.slice(2);
+const flags   = Object.fromEntries(
+  cliArgs.filter(a => a.startsWith('--'))
+    .map(a => { const [k, v] = a.slice(2).split('='); return [k, v ?? true]; })
+);
+
+const isDryRun  = flags['dry-run']  === true;
+const runNow    = flags['run-now']  === true;
+const maxPublish = parseInt(flags.max || '10', 10);
+const today     = new Date().toISOString().slice(0, 10);
+
+// ── 잡 목록 구성 ──────────────────────────────────────────────────────────────
+let jobs = [];
+
+if (flags.hotels) {
+  // 직접 지정
+  jobs = [{ hotels: flags.hotels, lang: flags.lang || 'ko', note: '직접 지정' }];
+} else {
+  // config/daily-jobs.json
+  const dailyJobsPath = path.join(ROOT, 'config', 'daily-jobs.json');
+  try {
+    jobs = JSON.parse(fs.readFileSync(dailyJobsPath, 'utf8'));
+  } catch (e) {
+    console.error(`[오류] daily-jobs.json 로드 실패: ${e.message}`);
+    process.exit(1);
   }
 }
 
-// ── Telegram 알림 (선택적) ────────────────────────────────────────────────────
-function notifyTelegram(text) {
-  const token  = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
-  const chatId = (process.env.TELEGRAM_CHAT_ID   || '').trim();
-  if (!token || !chatId) return;
-  const body = JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML' });
-  const https = require('https');
-  const req = https.request({
-    hostname: 'api.telegram.org', port: 443,
-    path: `/bot${token}/sendMessage`, method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-  }, res => { res.resume(); });
-  req.on('error', () => {});
-  req.setTimeout(8000, () => { req.destroy(); });
-  req.write(body); req.end();
+if (jobs.length === 0) {
+  console.log('[편집국] 오늘 실행할 잡이 없습니다.');
+  process.exit(0);
 }
 
-// ── 편집국 결과 파싱 ──────────────────────────────────────────────────────────
-function parseEditorialSummary(stdout) {
-  const lines = (stdout || '').split('\n');
-  const summary = {};
-  for (const l of lines) {
-    const m1 = l.match(/총 대상:\s*(\d+)/);  if (m1) summary.total = +m1[1];
-    const m2 = l.match(/발행 성공:\s*(\d+)/); if (m2) summary.published = +m2[1];
-    const m3 = l.match(/QA 실패[^:]*:\s*(\d+)/); if (m3) summary.qaFail = +m3[1];
-    const m4 = l.match(/발행 실패[^:]*:\s*(\d+)/); if (m4) summary.pubFail = +m4[1];
-    const m5 = l.match(/TOP3 실패 원인:\s*(.+)/); if (m5) summary.failReasons = m5[1];
-  }
-  return summary;
+// ── 중복 발행 체크 ────────────────────────────────────────────────────────────
+function getTodayPublishedCount() {
+  try {
+    const ids = JSON.parse(fs.readFileSync(
+      path.join(ROOT, 'state', 'published', 'published_ids.json'), 'utf8'
+    ));
+    return (ids.ids || []).filter(e => e.published_at && e.published_at.startsWith(today)).length;
+  } catch { return 0; }
 }
 
-// ── 스크립트 실행 ─────────────────────────────────────────────────────────────
-function runScript(scriptName, args = [], timeoutMin = 30) {
-  const scriptPath = path.join(__dirname, scriptName);
-  if (!fs.existsSync(scriptPath)) { log(`⚠️  스크립트 없음: ${scriptName}`); return false; }
-
-  log(`▶ ${scriptName} ${args.join(' ')}`);
-  const result = spawnSync(process.execPath, [scriptPath, ...args], {
-    encoding: 'utf8',
-    env:      { ...process.env },
-    cwd:      ROOT,
-    timeout:  timeoutMin * 60 * 1000,
-  });
-
-  if (result.stdout) process.stdout.write(result.stdout);
-  if (result.stderr) process.stderr.write(result.stderr);
-
-  const ok = result.status === 0;
-  log(ok ? `✅ ${scriptName} 완료` : `❌ ${scriptName} 실패 (exit ${result.status})`);
-  return ok;
-}
-
-// ── 편집국 실행 헬퍼 ──────────────────────────────────────────────────────────
-function runEditorial(args, maxPub) {
-  const edArgs = ['--auto', `--since=${kstDate()}`];
-  if (!args.noPublish && !args.dryRun) edArgs.push('--publish');
-  if (args.dryRun) edArgs.push('--dry-run');
-  edArgs.push(`--max-publish=${maxPub}`);
-
-  const scriptPath = path.join(__dirname, 'editorial-chief.js');
-  const result = require('child_process').spawnSync(process.execPath, [scriptPath, ...edArgs], {
-    encoding: 'utf8', env: { ...process.env }, cwd: ROOT,
-    timeout: 45 * 60 * 1000,
-  });
-  if (result.stdout) process.stdout.write(result.stdout);
-  if (result.stderr) process.stderr.write(result.stderr);
-  const ok = result.status === 0;
-  log(ok ? '✅ editorial-chief.js 완료' : `❌ editorial-chief.js 실패 (exit ${result.status})`);
-
-  // Telegram 요약 전송
-  const s = parseEditorialSummary(result.stdout || '');
-  const total = s.total || 0;
-  const published = s.published || 0;
-  const failed = (s.qaFail || 0) + (s.pubFail || 0);
-  if (total > 0) {
-    const lines = [
-      `🏨 <b>tripprice.net</b> 편집국 — ${kstDate()}`,
-      `총 ${total}건 | ✅ 발행 ${published} | ❌ 실패 ${failed}`,
-    ];
-    if (s.failReasons) lines.push(`실패 원인: ${s.failReasons}`);
-    notifyTelegram(lines.join('\n'));
-  } else if (!ok) {
-    notifyTelegram(`⚠️ tripprice.net 편집국 실행 오류\nexit ${result.status}`);
-  }
-
-  return ok;
-}
-
-// ── 실행 상태 ─────────────────────────────────────────────────────────────────
-const STATE_FILE = path.join(LOGS_DIR, '24h-scheduler-state.json');
-function loadState() {
-  try { if (fs.existsSync(STATE_FILE)) return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch { /* ignore */ }
-  return { lastRun: {}, totalRuns: 0 };
-}
-function saveState(state) {
-  try { fs.mkdirSync(LOGS_DIR, { recursive: true }); fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf8'); } catch { /* ignore */ }
-}
-
-// ── 작업 목록 ─────────────────────────────────────────────────────────────────
-function buildJobs(args) {
-  return [
-    {
-      id: 'hoteldata-sync', hhmm: 600, cooldownMin: 360,
-      label: '📡 Agoda 데이터 동기화',
-      run: () => runScript('agoda-hoteldata-sync.js', [], 20),
-    },
-    {
-      id: 'editorial-1', hhmm: 800, cooldownMin: 90,
-      label: '🏢 편집국 1차 → WP 발행',
-      run: () => runEditorial(args, args.maxPublish),
-    },
-    {
-      id: 'editorial-2', hhmm: 1000, cooldownMin: 90,
-      label: '🏢 편집국 2차 → WP 발행',
-      run: () => runEditorial(args, Math.max(1, Math.floor(args.maxPublish / 2))),
-    },
-    {
-      id: 'image-batch', hhmm: 1400, cooldownMin: 360,
-      label: '🖼️ 이미지 처리 배치',
-      run: () => runScript('process-images.js', [], 20),
-    },
-    {
-      id: 'kpi-sync', hhmm: 2200, cooldownMin: 360,
-      label: '💰 KPI 동기화',
-      run: () => runScript('agoda-report-parse.js', [], 10),
-    },
-    {
-      id: 'pre-select', hhmm: 2300, cooldownMin: 360,
-      label: '🗂️ 내일 큐 사전 준비',
-      run: () => runScript('desk-assign.js', [`--since=${kstDate()}`, '--limit=20', '--min-score=60'], 5),
-    },
+// ── 파이프라인 실행 헬퍼 ──────────────────────────────────────────────────────
+function runPipeline(job) {
+  const pipelineArgs = [
+    path.join(SCRIPTS, 'pipeline.js'),
+    `--hotels=${job.hotels}`,
+    `--lang=${job.lang || 'ko'}`,
+    ...(isDryRun ? [] : ['--publish']),
   ];
+
+  try {
+    const out = execFileSync(NODE, pipelineArgs, {
+      cwd:      ROOT,
+      env:      process.env,
+      encoding: 'utf8',
+      timeout:  600_000, // 10분
+    });
+    process.stdout.write(out);
+
+    // WP_RESULT_JSON 줄에서 결과 파싱
+    const resultLine = out.split('\n').find(l => l.startsWith('WP_RESULT_JSON:'));
+    if (resultLine) {
+      try {
+        return JSON.parse(resultLine.replace('WP_RESULT_JSON:', '').trim());
+      } catch { /* skip */ }
+    }
+    // dry-run 또는 발행 없음
+    return { dry_run: isDryRun, hotels: job.hotels };
+  } catch (err) {
+    process.stdout.write(err.stdout || '');
+    process.stderr.write(err.stderr || '');
+    console.error(`\n❌ [pipeline] 실패 — ${job.note || job.hotels}`);
+    return null;
+  }
 }
 
-// ── 실행 대상 판단 (±5분 윈도우 + 쿨다운) ────────────────────────────────────
-function shouldRun(job, state) {
-  const last = state.lastRun[job.id];
-  if (!last) return true;
-  return (Date.now() - new Date(last).getTime()) / 60000 >= job.cooldownMin;
-}
+// ── 메인 ─────────────────────────────────────────────────────────────────────
+(async () => {
+  const banner = '═'.repeat(55);
+  console.log(banner);
+  console.log('  Tripprice 편집국 — 일일 자동 실행');
+  console.log(`  날짜: ${today}  모드: ${isDryRun ? 'dry-run' : '발행'}`);
+  console.log(`  잡: ${jobs.length}개  최대 발행: ${maxPublish}편`);
+  console.log(banner);
 
-function findDue(jobs, state) {
-  const now = kstHHMM();
-  return jobs.filter(j => {
-    const diff = Math.min(Math.abs(now - j.hhmm), 2400 - Math.abs(now - j.hhmm));
-    return diff <= 5 && shouldRun(j, state);
-  });
-}
-
-// ── 메인 ──────────────────────────────────────────────────────────────────────
-function main() {
-  loadEnv();
-  const args = parseArgs();
-  const jobs = buildJobs(args);
-
-  console.log('\n╔══════════════════════════════════════════════╗');
-  console.log('║  Tripprice 편집국 24/7 스케줄러              ║');
-  console.log(`║  모드: ${args.dryRun ? 'DRY-RUN' : args.noPublish ? 'NO-PUBLISH' : 'LIVE → WordPress 직접 발행'}`);
-  console.log(`║  최대 발행: ${args.maxPublish}건/일`);
-  console.log('╚══════════════════════════════════════════════╝\n');
-
-  jobs.forEach(j => {
-    const h = String(Math.floor(j.hhmm / 100)).padStart(2, '0');
-    const m = String(j.hhmm % 100).padStart(2, '0');
-    log(`  ${h}:${m} — ${j.label}`);
-  });
-
-  // --run-now: 즉시 편집국 실행
-  if (args.runNow) {
-    log('--run-now: 즉시 실행');
-    runEditorial(args, args.maxPublish);
+  // 이미 오늘 발행된 편 수 확인
+  let todayCount = getTodayPublishedCount();
+  if (!isDryRun && todayCount >= maxPublish) {
+    console.log(`\n[편집국] 오늘 이미 ${todayCount}편 발행 완료 (최대: ${maxPublish}). 종료.`);
+    await notify.send(`ℹ️ 편집국: 오늘(${today}) 이미 ${todayCount}편 발행됨 — 자동 종료`).catch(() => {});
+    process.exit(0);
   }
 
-  // 1분 폴링 루프
-  function tick() {
-    const state = loadState();
-    for (const job of findDue(jobs, state)) {
-      log(`⏰ ${job.label}`);
-      job.run();
-      state.lastRun[job.id] = new Date().toISOString();
-      state.totalRuns = (state.totalRuns || 0) + 1;
-      saveState(state);
+  const results   = [];
+  const published = [];
+
+  for (let i = 0; i < jobs.length; i++) {
+    const job = jobs[i];
+
+    if (!isDryRun && todayCount >= maxPublish) {
+      console.log(`\n[편집국] 최대 발행(${maxPublish})편 도달 — 나머지 잡 중단`);
+      break;
+    }
+
+    console.log(`\n[${i+1}/${jobs.length}] ${job.note || job.hotels} (${job.lang || 'ko'})`);
+    const result = runPipeline(job);
+    results.push({ job, result });
+
+    if (result && result.post_id) {
+      published.push({
+        title:  result.slug || job.hotels,
+        slug:   result.slug,
+        url:    result.url,
+        postId: result.post_id,
+      });
+      todayCount++;
     }
   }
 
-  tick();
-  const iv = setInterval(tick, 60 * 1000);
+  console.log(`\n${banner}`);
+  console.log(`  완료: ${published.length}편 발행, ${results.filter(r => !r.result).length}편 실패`);
+  console.log(banner);
 
-  // 1시간마다 생존 신호
-  setInterval(() => log(`━ 대기 중 (총 실행: ${loadState().totalRuns}회)`), 60 * 60 * 1000);
-
-  function shutdown(sig) {
-    log(`${sig} — 종료`);
-    clearInterval(iv);
-    process.exit(0);
+  if (isDryRun) {
+    console.log('\n[dry-run] Telegram/Notion 업데이트 건너뜀.');
+    return;
   }
-  process.on('SIGINT',  () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-  if (process.platform === 'win32') {
+  // ── Telegram 일일 KPI 요약 ────────────────────────────────────────────────
+  const totalPosts = (() => {
     try {
-      require('readline').createInterface({ input: process.stdin }).on('SIGINT', () => process.emit('SIGINT'));
-    } catch { /* ignore */ }
-  }
-}
+      const ids = JSON.parse(fs.readFileSync(
+        path.join(ROOT, 'state', 'published', 'published_ids.json'), 'utf8'
+      ));
+      return (ids.ids || []).filter(e => e.wp_post_id).length;
+    } catch { return '?'; }
+  })();
 
-if (require.main === module) main();
+  if (published.length > 0 || results.length > 0) {
+    await notify.dailyKpi({
+      date:       today,
+      published:  published.length,
+      totalPosts,
+      hotels:     published,
+    }).catch(() => {});
+  }
+
+  // ── Notion KPI (발행이 있을 때만) ────────────────────────────────────────
+  // 발행된 글 수는 wp-publish.js 내부에서 이미 incrementPosts() 호출됨.
+  // 여기서는 Notes 필드 업데이트만 (선택).
+  if (published.length > 0) {
+    const yearMonth = today.slice(0, 7);
+    const note      = `자동발행 ${today}: ${published.map(p => p.title).join(', ')}`;
+    await notionKpi.upsertMonthKpi(yearMonth, { notes: note }).catch(() => {});
+  }
+
+  console.log('\n[편집국] 일일 자동 실행 완료.');
+})().catch(async e => {
+  console.error('[편집국] 치명 오류:', e.message);
+  await notify.errorAlert('editorial-24h', e.message).catch(() => {});
+  process.exit(1);
+});

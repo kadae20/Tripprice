@@ -13,6 +13,8 @@
 
 const fs   = require('fs');
 const path = require('path');
+const { marked } = require('marked');
+const log = require('../lib/logger');
 
 // ── 순수 함수 (테스트 가능) ───────────────────────────────────────────────────
 
@@ -36,65 +38,43 @@ function parseFrontMatter(text) {
 }
 
 /**
- * 인라인 마크다운 → HTML (bold, italic, code, link).
- */
-function inlineMd(text) {
-  return text
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g,     '<em>$1</em>')
-    .replace(/`(.+?)`/g,       '<code>$1</code>')
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
-}
-
-/**
- * 마크다운 → Gutenberg 블록 HTML 변환.
- * Yoast SEO가 블록 에디터에서 분석하려면 <!-- wp:* --> 블록 마크업이 필요.
+ * 마크다운 → HTML 변환 (marked.js 사용).
+ * - ~ 단독 사용 시 del 태그 오작동 방지 (HTML 엔티티로 이스케이프)
+ * - 손상 문자(\uFFFD) 제거
+ * - CTA 링크 → Gutenberg 버튼 블록 변환
+ * - <hr> 제거
  */
 function minimalMdToHtml(md) {
-  const lines  = md.split('\n');
-  const blocks = [];
-  let listBuf  = [];
+  if (!md) return '';
 
-  function flushList() {
-    if (listBuf.length === 0) return;
-    const items = listBuf.map(l => `<li>${inlineMd(l)}</li>`).join('');
-    blocks.push(`<!-- wp:list -->\n<ul>${items}</ul>\n<!-- /wp:list -->`);
-    listBuf = [];
-  }
+  // 손상 문자 제거
+  let safe = md.replace(/\uFFFD/g, '');
 
-  for (const raw of lines) {
-    const line = raw;
+  // 구버전 Agoda URL 정규화 (/ko-kr/hotel/{id}.html → partnersearch.aspx)
+  safe = safe.replace(
+    /https:\/\/www\.agoda\.com\/ko-kr\/hotel\/(\d+)\.html\?cid=(\d+)[^\s)"']*/g,
+    (_, hid, cid) => `https://www.agoda.com/partners/partnersearch.aspx?hid=${hid}&cid=${cid}&currency=KRW&hl=ko`
+  );
 
-    if (/^### (.+)/.test(line)) {
-      flushList();
-      const t = inlineMd(line.replace(/^### /, ''));
-      blocks.push(`<!-- wp:heading {"level":3} -->\n<h3 class="wp-block-heading">${t}</h3>\n<!-- /wp:heading -->`);
-    } else if (/^## (.+)/.test(line)) {
-      flushList();
-      const t = inlineMd(line.replace(/^## /, ''));
-      blocks.push(`<!-- wp:heading {"level":2} -->\n<h2 class="wp-block-heading">${t}</h2>\n<!-- /wp:heading -->`);
-    } else if (/^# (.+)/.test(line)) {
-      flushList();
-      const t = inlineMd(line.replace(/^# /, ''));
-      blocks.push(`<!-- wp:heading {"level":1} -->\n<h1 class="wp-block-heading">${t}</h1>\n<!-- /wp:heading -->`);
-    } else if (/^> (.+)/.test(line)) {
-      flushList();
-      const t = inlineMd(line.replace(/^> /, ''));
-      blocks.push(`<!-- wp:quote -->\n<blockquote class="wp-block-quote"><p>${t}</p></blockquote>\n<!-- /wp:quote -->`);
-    } else if (/^- (.+)/.test(line)) {
-      listBuf.push(line.replace(/^- /, ''));
-    } else if (/^---$/.test(line)) {
-      flushList();
-      blocks.push(`<!-- wp:separator -->\n<hr class="wp-block-separator"/>\n<!-- /wp:separator -->`);
-    } else if (line.trim() === '') {
-      flushList();
-    } else {
-      flushList();
-      blocks.push(`<!-- wp:paragraph -->\n<p>${inlineMd(line)}</p>\n<!-- /wp:paragraph -->`);
-    }
-  }
-  flushList();
-  return blocks.join('\n\n');
+  // 단독 ~ 이스케이프 (~~취소선~~ 은 유지, 숫자 범위 표현 10~12 등)
+  safe = safe.replace(/(?<!~)~(?!~)/g, '&#126;');
+
+  // CTA 링크 → Gutenberg 버튼 블록 (발행 전 변환)
+  safe = safe.replace(
+    /\[([^\]]*현재\s*가격\s*확인하기[^\]]*)\]\((https?:\/\/[^)]+)\)/g,
+    (_, label, url) =>
+      `\n\n<!-- wp:buttons {"layout":{"type":"flex","justifyContent":"center"}} -->\n` +
+      `<div class="wp-block-buttons"><!-- wp:button {"backgroundColor":"vivid-red","textColor":"white","style":{"border":{"radius":"6px"}}} -->\n` +
+      `<div class="wp-block-button"><a class="wp-block-button__link has-white-color has-vivid-red-background-color has-text-color has-background wp-element-button" href="${url}" target="_blank" rel="noopener noreferrer sponsored">${label}</a></div>\n` +
+      `<!-- /wp:button --></div>\n<!-- /wp:buttons -->\n\n`
+  );
+
+  let html = marked.parse(safe);
+
+  // <hr> 제거
+  html = html.replace(/<hr\s*\/?>/gi, '');
+
+  return html;
 }
 
 /**
@@ -359,8 +339,7 @@ if (require.main === module) {
   );
 
   if (!args.draft) {
-    console.error('오류: --draft 옵션이 필요합니다.');
-    console.error('  예: node scripts/build-wp-post.js --draft=draft-seoul-luxury-comparison-2026-03-05');
+    log.error('--draft 옵션이 필요합니다. 예: node scripts/build-wp-post.js --draft=draft-xxx-2026-03-05');
     process.exit(1);
   }
 
@@ -511,48 +490,28 @@ if (require.main === module) {
   const REQUIRED = ['post_title', 'slug', 'post_status', 'lang'];
   const missing  = REQUIRED.filter(f => !post[f]);
   if (missing.length > 0) {
-    console.error(`❌ 필수 필드 누락: ${missing.join(', ')}`);
+    log.error(`필수 필드 누락: ${missing.join(', ')}`);
     process.exit(1);
   }
   if (post.post_status !== 'draft') {
-    console.error('❌ post_status가 draft가 아닙니다.');
+    log.error('post_status가 draft가 아닙니다.');
     process.exit(1);
   }
 
-  // 저장
   const outFilename = `post-${slug}-${today}.json`;
   const outPath     = path.join(DRAFTS_DIR, outFilename);
   fs.writeFileSync(outPath, JSON.stringify(post, null, 2), 'utf8');
 
-  // 콘솔 출력
-  console.log('\n발행 번들 JSON 생성 완료');
-  console.log(`  파일: ${outPath}`);
-  console.log('');
-  console.log('핵심 필드 요약:');
-  console.log(`  post_title:       "${post.post_title}"`);
-  console.log(`  slug:             "${post.slug}"`);
-  console.log(`  post_status:      "${post.post_status}"  ← 항상 draft`);
-  console.log(`  lang:             "${post.lang}"`);
-  console.log(`  meta_desc 길이:   ${post.meta.meta_description.length}자`);
-  console.log(`  affiliate_links:    ${post.affiliate_links.length}개`);
-  console.log(`  internal_links:     ${post.internal_links.length}개`);
-  console.log(`  faq 항목:           ${faqItems.length}개`);
-  console.log(`  categories (추론):  [${post.categories.join(', ') || '비어있음'}]`);
-  console.log(`  tags (추론):        [${post.tags.join(', ') || '비어있음'}]`);
-  console.log(`  featured_media_url: ${post.featured_media_url || '없음 (wp-publish 시 미디어 업로드 건너뜀)'}`);
   const totalContentImages = (post.content_images || []).reduce((s, sec) => s + (sec.images || []).length, 0);
-  console.log(`  content_images:     ${post.content_images.length}개 섹션, 총 ${totalContentImages}장`);
-  console.log(`  coverage_score:     ${coverageScore ?? '없음 (brief 미참조)'}`);
-  console.log(`  data_notice:        포함`);
-  console.log(`  affiliate_notice:   포함`);
-  console.log(`  workflow_state:   brief/draft/seo_qa=true, cta=${post.workflow_state.cta}, internal_links=${post.workflow_state.internal_links}`);
+  log.info(`\n발행 번들 JSON 생성 완료`);
+  log.info(`  파일: ${outPath}`);
+  log.info(`  "${post.post_title}" | ${post.lang} | ${post.slug}`);
+  log.info(`  affiliate:${post.affiliate_links.length} internal:${post.internal_links.length} faq:${faqItems.length} images:${totalContentImages}장`);
+  log.info(`  coverage:${coverageScore ?? 'N/A'} | cta:${post.workflow_state.cta} | internal_links:${post.workflow_state.internal_links}`);
 
   if (warnings.length > 0) {
-    console.log('\n⚠️  경고:');
-    warnings.forEach(w => console.log(`  - ${w}`));
+    warnings.forEach(w => log.warn(w));
   }
 
-  console.log('\n다음 단계:');
-  console.log(`  WP_URL=${SITE_URL} WP_USER=admin WP_APP_PASS="xxxx xxxx" \\`);
-  console.log(`    node scripts/wp-publish.js wordpress/drafts/${outFilename}`);
+  log.info(`\n다음 단계: node scripts/wp-publish.js wordpress/drafts/${outFilename}`);
 }

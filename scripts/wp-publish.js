@@ -26,6 +26,11 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { marked } = require('marked');
+
+// 알림 + KPI (미설정 시 조용히 스킵)
+const notify    = require('../lib/notify');
+const notionKpi = require('../lib/notion-kpi');
 
 // ──────────────────────────────────────────────
 // Node 버전 확인 (fetch는 Node 18+)
@@ -140,96 +145,8 @@ function loadEnv() {
   return { WP_URL, WP_USER, WP_APP_PASS, authHeader };
 }
 
-// ──────────────────────────────────────────────
-// Markdown → HTML 변환기 (외부 패키지 없음)
-// 기본 요소 지원: H1~H3, bold, italic, lists,
-//   blockquotes, code, links, paragraphs
-// ──────────────────────────────────────────────
 function markdownToHTML(md) {
-  if (!md || typeof md !== 'string') return '';
-
-  function inlineFormat(text) {
-    return text
-      .replace(/`([^`]+)`/g, '<code>$1</code>')
-      .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
-      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-      .replace(/\*(.+?)\*/g, '<em>$1</em>')
-      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, linkText, href) => {
-        if (!/^https?:\/\//.test(href)) return `<a href="${href}">${linkText}</a>`;
-        const isAffiliate = /agoda\.com|booking\.com/.test(href);
-        let finalHref = href;
-        if (isAffiliate && !href.includes('utm_source')) {
-          const sep = href.includes('?') ? '&' : '?';
-          finalHref = `${href}${sep}utm_source=tripprice&utm_medium=referral&utm_campaign=hotel_review`;
-        }
-        const rel = isAffiliate ? 'nofollow sponsored noopener noreferrer' : 'noopener noreferrer';
-        return `<a href="${finalHref}" target="_blank" rel="${rel}">${linkText}</a>`;
-      });
-  }
-
-  // Gutenberg 블록 형식으로 변환
-  const lines  = md.split('\n');
-  const blocks = [];
-  let ulBuf    = [];
-  let olBuf    = [];
-
-  function flushUl() {
-    if (!ulBuf.length) return;
-    const items = ulBuf.map(l => `<li>${inlineFormat(l)}</li>`).join('');
-    blocks.push(`<!-- wp:list -->\n<ul class="wp-block-list">${items}</ul>\n<!-- /wp:list -->`);
-    ulBuf = [];
-  }
-  function flushOl() {
-    if (!olBuf.length) return;
-    const items = olBuf.map(l => `<li>${inlineFormat(l)}</li>`).join('');
-    blocks.push(`<!-- wp:list {"ordered":true} -->\n<ol class="wp-block-list">${items}</ol>\n<!-- /wp:list -->`);
-    olBuf = [];
-  }
-  function flushLists() { flushUl(); flushOl(); }
-
-  for (const rawLine of lines) {
-    const trimmed = rawLine.trim();
-
-    if (trimmed === '') { flushLists(); continue; }
-
-    const h4m = trimmed.match(/^#### (.+)/);
-    const h3m = trimmed.match(/^### (.+)/);
-    const h2m = trimmed.match(/^## (.+)/);
-    const h1m = trimmed.match(/^# (.+)/);
-
-    if (h1m) {
-      flushLists();
-      blocks.push(`<!-- wp:heading {"level":1} -->\n<h1 class="wp-block-heading">${inlineFormat(h1m[1])}</h1>\n<!-- /wp:heading -->`);
-    } else if (h2m) {
-      flushLists();
-      blocks.push(`<!-- wp:heading {"level":2} -->\n<h2 class="wp-block-heading">${inlineFormat(h2m[1])}</h2>\n<!-- /wp:heading -->`);
-    } else if (h3m) {
-      flushLists();
-      blocks.push(`<!-- wp:heading {"level":3} -->\n<h3 class="wp-block-heading">${inlineFormat(h3m[1])}</h3>\n<!-- /wp:heading -->`);
-    } else if (h4m) {
-      flushLists();
-      blocks.push(`<!-- wp:heading {"level":4} -->\n<h4 class="wp-block-heading">${inlineFormat(h4m[1])}</h4>\n<!-- /wp:heading -->`);
-    } else if (/^---+$/.test(trimmed) || /^\*\*\*+$/.test(trimmed)) {
-      flushLists();
-      blocks.push(`<!-- wp:separator -->\n<hr class="wp-block-separator has-alpha-channel-opacity"/>\n<!-- /wp:separator -->`);
-    } else if (trimmed.match(/^[-*+] (.+)/)) {
-      flushOl();
-      ulBuf.push(trimmed.replace(/^[-*+] /, ''));
-    } else if (trimmed.match(/^\d+\. (.+)/)) {
-      flushUl();
-      olBuf.push(trimmed.replace(/^\d+\. /, ''));
-    } else if (trimmed.match(/^> (.+)/)) {
-      flushLists();
-      const t = inlineFormat(trimmed.replace(/^> /, ''));
-      blocks.push(`<!-- wp:quote -->\n<blockquote class="wp-block-quote"><p>${t}</p></blockquote>\n<!-- /wp:quote -->`);
-    } else {
-      flushLists();
-      blocks.push(`<!-- wp:paragraph -->\n<p>${inlineFormat(trimmed)}</p>\n<!-- /wp:paragraph -->`);
-    }
-  }
-  flushLists();
-
-  return blocks.join('\n\n');
+  return marked.parse(md || '');
 }
 
 // ──────────────────────────────────────────────
@@ -618,7 +535,7 @@ function buildPayload(data, { featuredMediaId = null, injectedContentHtml = null
   const metaFields = {};
 
   // Yoast SEO 4개 필드 자동 주입
-  // 전제: wordpress/mu-plugin/tripprice-seo-meta.php 가 WP 서버에 배포되어 있어야 실제 저장됨
+  // 전제: tripprice-seo-meta 플러그인이 활성화되어 있어야 실제 저장됨 (REST API custom fields)
   const focusKeyphrase = data.yoast_meta?.focus_keyphrase || '';
   if (focusKeyphrase) {
     metaFields._yoast_wpseo_focuskw = focusKeyphrase;
@@ -816,6 +733,33 @@ function saveResult(slug, result, inputPath, wpUrl) {
 
   const outPath = path.join(DIR_CAMPAIGNS, `${slug}-published.json`);
   fs.writeFileSync(outPath, JSON.stringify(record, null, 2), 'utf8');
+
+  // published_ids.json 누적 저장 (중복 발행 방지용 단일 진실 소스)
+  try {
+    const IDS_PATH = path.join(ROOT, 'state', 'published', 'published_ids.json');
+    const existing = fs.existsSync(IDS_PATH)
+      ? JSON.parse(fs.readFileSync(IDS_PATH, 'utf8'))
+      : { generated_at: new Date().toISOString(), count: 0, ids: [] };
+
+    const alreadyIn = existing.ids.some(e => e.slug === slug);
+    if (!alreadyIn) {
+      let hotel_ids = [];
+      try { hotel_ids = JSON.parse(fs.readFileSync(inputPath, 'utf8')).hotel_ids || []; } catch { /* skip */ }
+      existing.ids.push({
+        slug,
+        hotel_ids,
+        wp_post_id: result.id,
+        published_at: record.published_at,
+      });
+      existing.count = existing.ids.length;
+      existing.updated_at = new Date().toISOString();
+      fs.mkdirSync(path.dirname(IDS_PATH), { recursive: true });
+      fs.writeFileSync(IDS_PATH, JSON.stringify(existing, null, 2), 'utf8');
+    }
+  } catch (e) {
+    process.stderr.write(`[WARN] published_ids.json 업데이트 실패: ${e.message}\n`);
+  }
+
   return { outPath, record };
 }
 
@@ -1079,7 +1023,7 @@ async function main() {
     console.log(`Yoast SEO 제목: ${data.yoast_meta.seo_title}`);
   }
   if (!data.yoast_meta?.focus_keyphrase && !data.yoast_meta?.seo_title) {
-    console.log('yoast_meta 없음 — Yoast 필드 주입 건너뜀 (mu-plugin 배포 후 재실행 가능)');
+    console.log('yoast_meta 없음 — Yoast 필드 주입 건너뜀');
   }
 
   // 7) 발행 (publish 실패 시 draft 1회 fallback)
@@ -1120,6 +1064,21 @@ async function main() {
 
   // 결과 저장
   const { outPath, record } = saveResult(data.slug, result, inputPath, env.WP_URL);
+
+  // Telegram 발행 알림 + Notion KPI 업데이트 (비동기, 실패해도 계속)
+  const isActuallyPublished = result.status === 'publish';
+  if (isActuallyPublished) {
+    const postUrl = result.link || `${env.WP_URL}/${result.slug}/`;
+    await Promise.all([
+      notify.publishAlert({
+        title:    result.title?.rendered || data.post_title,
+        url:      postUrl,
+        focuskw:  data.yoast_meta?.focus_keyphrase || '',
+        postId:   result.id,
+      }).catch(() => {}),
+      notionKpi.incrementPosts(1).catch(() => {}),
+    ]);
+  }
 
   // 8) 성공 출력
   // machine-readable 한 줄 — editorial-chief.js가 post_id 파싱에 사용

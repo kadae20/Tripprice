@@ -18,6 +18,7 @@
 const fs = require('fs');
 const path = require('path');
 const { parse: csvParseSync } = require('csv-parse/sync');
+const { buildPartnerUrl: buildAgodaUrl, getCID } = require('../lib/agoda-link-builder');
 
 // ──────────────────────────────────────────────
 // 경로 설정
@@ -290,7 +291,6 @@ function normalizeHotel(raw) {
   }
 
   // ── partner_url: agoda_hotel_id로 자동 생성 ───
-  const cid = process.env.AGODA_CID || '1926938';
   let agodaId = (raw.agoda_hotel_id || '').trim();
   const utmCampaign = (raw.utm_campaign || hotelId).trim();
   let partnerUrl = (raw.partner_url || '').trim();
@@ -299,7 +299,7 @@ function normalizeHotel(raw) {
   if (partnerUrl && !partnerUrl.includes('cid=')) {
     try {
       const u = new URL(partnerUrl);
-      u.searchParams.set('cid', cid);
+      u.searchParams.set('cid', getCID());
       partnerUrl = u.toString();
     } catch { /* 잘못된 URL 무시 */ }
   }
@@ -312,7 +312,7 @@ function normalizeHotel(raw) {
 
   // partner_url 없으면 agodaId로 생성
   if (!partnerUrl && agodaId) {
-    partnerUrl = `https://www.agoda.com/hotel/${agodaId}?cid=${cid}&tag=${utmCampaign}`;
+    partnerUrl = buildAgodaUrl(agodaId, utmCampaign);
   }
 
   return {

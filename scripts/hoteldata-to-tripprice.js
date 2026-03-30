@@ -25,7 +25,8 @@ const ROOT       = path.resolve(__dirname, '..');
 const INPUT_CSV  = path.resolve(ROOT, process.env.HOTELDATA_SUBSET_CSV    || 'data/hotels/hotels-subset.csv');
 const OUTPUT_CSV = path.resolve(ROOT, process.env.HOTELDATA_TRIPPRICE_CSV || 'data/hotels/tripprice-hotels.csv');
 const REPORT_DIR = path.join(ROOT, 'state', 'campaigns');
-const CID        = (process.env.AGODA_CID || '1926938').trim();
+
+const { buildPartnerUrl: buildAgodaUrl } = require('../lib/agoda-link-builder');
 
 // ── Tripprice ingest 출력 컬럼 (ingest-hotel-data.js 스키마 기준) ─────────────
 const OUTPUT_HEADERS = [
@@ -186,16 +187,16 @@ function slugify(str) {
  * @param {string} hotelId    — Tripprice slug (tag 파라미터용)
  * @param {string} [cid]      — CID (기본: 모듈 상수 CID)
  */
-function buildPartnerUrl(landingUrl, agodaId, hotelId, cid = CID) {
+function buildPartnerUrl(landingUrl, agodaId, hotelId) {
   if (landingUrl) {
     try {
       const u = new URL(landingUrl);
-      u.searchParams.set('cid', cid);
+      if (!u.searchParams.has('cid')) u.searchParams.set('cid', require('../lib/agoda-link-builder').getCID());
       return u.toString();
     } catch { /* 잘못된 URL → 직접 구성 */ }
   }
   if (agodaId) {
-    return `https://www.agoda.com/hotel/${agodaId}?cid=${cid}&tag=${hotelId}`;
+    return buildAgodaUrl(agodaId, hotelId);
   }
   return '';
 }

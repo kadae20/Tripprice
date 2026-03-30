@@ -11,6 +11,8 @@
 
 const fs = require('fs');
 const path = require('path');
+const { buildPartnerUrlFromHotel } = require('../lib/agoda-link-builder');
+const log = require('../lib/logger');
 
 // ── .env / .env.local 자동 로드 (비밀값 로그 출력 없음) ──────────────────────
 ;(function loadEnv() {
@@ -494,7 +496,7 @@ function buildHotelSection(h) {
 
   // CTA
   const ctaText = isKo ? `${name} 현재 가격 확인하기 →` : `Check current prices for ${name} →`;
-  const ctaUrl = h.partner_url || `https://www.agoda.com/hotel/${h.agoda_hotel_id}`;
+  const ctaUrl = h.partner_url || buildPartnerUrlFromHotel(h) || '';
   lines.push(`> **[${ctaText}](${ctaUrl})**`);
   lines.push('> *(아고다 파트너 링크 | rel="sponsored")*');
   lines.push('');
@@ -614,7 +616,7 @@ function buildTop5HotelSection(h, rank, th) {
   lines.push('');
 
   const ctaText = `${name} 현재 가격 확인하기 →`;
-  const ctaUrl  = h.partner_url || `https://www.agoda.com/hotel/${h.agoda_hotel_id}`;
+  const ctaUrl  = h.partner_url || buildPartnerUrlFromHotel(h) || '';
   lines.push(`> **[${ctaText}](${ctaUrl})**`);
   lines.push('> *(아고다 파트너 링크 | rel="sponsored")*');
   lines.push('');
@@ -709,10 +711,11 @@ function buildTemplateBody() {
 
 function validateAiBody(text) {
   if (!text || text.length < 800)                      return false;
-  if (!/^#\s/.test(text.trim()))                       return false;
+  if (!/^#\s/m.test(text))                             return false;  // H1 어디서든
   if (!/##\s*(자주\s*묻는|FAQ)/i.test(text))           return false;
   if (!/현재\s*가격\s*확인하기/.test(text))             return false;
-  if (!/가격·혜택·환불/.test(text))                    return false;
+  if (!/가격[·・,]?\s*(혜택|정보)/.test(text) &&
+      !/변동될\s*수\s*있/.test(text))                  return false;  // 면책고지 유연 체크
   // FAQ 3개 이상 검증
   const faqCount = (text.match(/\*\*Q[.:]/g) || []).length;
   if (faqCount < 3)                                    return false;
@@ -721,11 +724,8 @@ function validateAiBody(text) {
 
 // ── 마크다운 조립 (async: Z.ai 필수, top5-list만 템플릿) ─────────────────────
 (async () => {
-  // ZAI_API_KEY 확인 — 없으면 즉시 중단 (템플릿 폴백 없음)
-  if (!isTop5List && !process.env.ZAI_API_KEY) {
-    console.error('\n[오류] ZAI_API_KEY가 설정되지 않았습니다.');
-    console.error('  .env 파일에 ZAI_API_KEY=<키값> 을 추가하세요.');
-    console.error('  AI 없이 템플릿으로 발행하면 동일한 구조의 글이 반복될 수 있습니다.');
+  if (!isTop5List && !process.env.ZAI_API_KEY && !process.env.ANTHROPIC_API_KEY) {
+    log.error('AI API 키가 없습니다. ZAI_API_KEY 또는 ANTHROPIC_API_KEY를 .env.local에 추가하세요.');
     process.exit(1);
   }
 
@@ -733,76 +733,56 @@ function validateAiBody(text) {
   let body;
   let source;
 
-  // top5-list는 템플릿 사용 (구조화 데이터 나열형, AI 불필요)
   if (isTop5List) {
     body   = buildTop5ListBody();
     source = 'template(top5-list)';
   } else {
-    const zai = require('../lib/zai-client');
-
-    // 1차 시도
+    const usesClaude = !!process.env.ANTHROPIC_API_KEY;
+    const zai = usesClaude ? require('../lib/claude-client') : require('../lib/zai-client');
+    const aiLabel = usesClaude ? 'Claude' : 'Z.ai';
     let aiBody = null;
     let lastErr = null;
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        console.log(`  Z.ai 글 생성 중... (${attempt}차 시도)`);
-        aiBody = await zai.generateHotelDraft(brief);
+        log.info(`  ${aiLabel} 글 생성 중... (${attempt}차 시도)`);
+        aiBody = (await zai.generateHotelDraft(brief)).replace(/\uFFFD/g, '');
         if (validateAiBody(aiBody)) break;
-        console.warn(`  ⚠  Z.ai 응답 검증 미달 (${attempt}차) — 재시도`);
+        log.warn(`${aiLabel} 응답 검증 미달 (${attempt}차) — 재시도`);
         aiBody = null;
       } catch (err) {
         lastErr = err;
-        console.warn(`  ⚠  Z.ai 오류 (${attempt}차): ${err.message.slice(0, 80)}`);
+        log.warn(`${aiLabel} 오류 (${attempt}차): ${err.message.slice(0, 120)}`);
         if (attempt < 2) await new Promise(r => setTimeout(r, 3000));
       }
     }
 
     if (!aiBody) {
-      console.error('\n[오류] Z.ai 글 생성 실패. 발행을 중단합니다.');
-      if (lastErr) console.error(`  원인: ${lastErr.message}`);
-      console.error('  → 잠시 후 재시도하거나 ZAI_API_KEY를 확인하세요.');
+      log.error(`${aiLabel} 글 생성 실패`, lastErr?.message);
       process.exit(1);
     }
 
     body   = aiBody;
-    source = 'z.ai';
+    source = aiLabel.toLowerCase();
   }
 
   const markdown = frontMatter + '\n' + body;
-
-  // ── 출력 ──────────────────────────────────────────────────────────────────
   const outFilename = `draft-${slug}-${today}.md`;
   const outPath = path.join(DRAFTS_DIR, outFilename);
   fs.writeFileSync(outPath, markdown, 'utf8');
 
-  // 섹션 목록 추출 (H2 헤더)
-  const sectionList = markdown.split('\n')
-    .filter(l => l.startsWith('## '))
-    .map(l => l.replace('## ', '').trim());
+  const finalKeyphrase  = buildFocusKeyphrase();
+  const finalYoastTitle = buildYoastSeoTitle(finalKeyphrase);
+  const sectionList = markdown.split('\n').filter(l => l.startsWith('## ')).map(l => l.slice(3).trim());
 
-  const finalTitle       = ensureMinTitle(suggested_title);
-  const finalMeta        = ensureMinMeta(suggested_meta_description);
-  const finalFeaturedUrl = resolveFeaturedImageUrl();
-  const finalKeyphrase   = buildFocusKeyphrase();
-  const finalYoastTitle  = buildYoastSeoTitle(finalKeyphrase);
-  const finalYoastMeta   = buildYoastMetaDesc(finalKeyphrase);
-
-  console.log('\n초안 생성 완료');
-  console.log(`  파일: ${outPath}`);
-  console.log(`  초안 생성: ${source}`);
-  console.log(`  제목: ${finalTitle} (${finalTitle.length}자)`);
-  console.log(`  슬러그: ${slug}`);
-  console.log(`  호텔: ${hotels.map(hotelName).join(', ')}`);
-  console.log(`  meta_desc: ${finalMeta.length}자`);
-  console.log(`  focus_keyphrase:    "${finalKeyphrase}"`);
-  console.log(`  yoast_seo_title:    "${finalYoastTitle}" (${finalYoastTitle.length}자)`);
-  console.log(`  yoast_meta_desc:    ${finalYoastMeta.length}자`);
-  console.log(`  featured_image_url: ${finalFeaturedUrl || '없음 (assets/processed 이미지 없음)'}`);
-  console.log(`\n포함된 섹션:`);
-  sectionList.forEach(s => console.log(`  - ${s}`));
-  console.log(`\n다음 단계:`);
-  console.log(`  node scripts/seo-qa.js --draft=${outFilename.replace('.md', '')}`);
+  log.info(`\n초안 생성 완료 [${source}]`);
+  log.info(`  파일: ${outPath}`);
+  log.info(`  제목: ${ensureMinTitle(suggested_title)}`);
+  log.info(`  슬러그: ${slug} | focus: "${finalKeyphrase}"`);
+  log.info(`  yoast_title: "${finalYoastTitle}"`);
+  log.info(`  섹션: ${sectionList.join(' / ')}`);
+  log.info(`\n다음 단계: node scripts/seo-qa.js --draft=${outFilename.replace('.md', '')}`);
 })().catch(err => {
-  console.error('초안 생성 실패:', err.message);
+  const log2 = require('../lib/logger');
+  log2.error('초안 생성 실패', err.message);
   process.exit(1);
 });

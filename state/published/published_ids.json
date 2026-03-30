@@ -1,0 +1,49 @@
+{
+  "generated_at": "2026-03-30T05:53:58.907Z",
+  "updated_at": "2026-03-30T10:21:55.418Z",
+  "count": 7,
+  "ids": [
+    {
+      "slug": "ibis-ambassador-seoul-myeongdong-review",
+      "hotel_ids": [],
+      "wp_post_id": null,
+      "published_at": null
+    },
+    {
+      "slug": "shilla-stay-mapo-review",
+      "hotel_ids": [],
+      "wp_post_id": null,
+      "published_at": null
+    },
+    {
+      "slug": "the-westin-josun-seoul-review",
+      "hotel_ids": [],
+      "wp_post_id": null,
+      "published_at": null
+    },
+    {
+      "slug": "ibis-ambassador-seoul-myeongdong-review-2026-03-13",
+      "hotel_ids": [],
+      "wp_post_id": null,
+      "published_at": "2026-03-13T09:56:57.444Z"
+    },
+    {
+      "slug": "shilla-stay-mapo-review-2026-03-23",
+      "hotel_ids": [],
+      "wp_post_id": null,
+      "published_at": "2026-03-23T11:33:00.080Z"
+    },
+    {
+      "slug": "the-westin-josun-seoul-review-2026-03-24",
+      "hotel_ids": [],
+      "wp_post_id": null,
+      "published_at": "2026-03-24T08:34:55.414Z"
+    },
+    {
+      "slug": "jw-marriott-hotel-seoul-review",
+      "hotel_ids": ["jw-marriott-hotel-seoul-seoul"],
+      "wp_post_id": 1339,
+      "published_at": "2026-03-30T10:21:55.418Z"
+    }
+  ]
+}

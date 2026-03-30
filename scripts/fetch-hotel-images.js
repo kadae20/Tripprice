@@ -28,6 +28,7 @@
 const fs    = require('fs');
 const path  = require('path');
 const https = require('https');
+const { getCID } = require('../lib/agoda-link-builder');
 
 const ROOT      = path.resolve(__dirname, '..');
 const DIR_DATA  = path.join(ROOT, 'data', 'processed');
@@ -87,7 +88,7 @@ function extractImageUrls(body) {
  */
 function fetchFromApi(agodaHotelId) {
   const API_KEY = process.env.AGODA_API_KEY || '';
-  const CID     = process.env.AGODA_CID || '1926938';
+  const CID     = getCID();
 
   if (!API_KEY) {
     console.log('  ℹ  AGODA_API_KEY 없음 — Content API 건너뜀 (서버 실행 시 채워집니다)');

@@ -39,26 +39,18 @@ const args = Object.fromEntries(
     .map(a => { const [k, v] = a.slice(2).split('='); return [k, v ?? true]; })
 );
 
-const CID         = process.env.AGODA_CID || '1926938';
 const API_KEY_RAW = process.env.AGODA_API_KEY || '';
 const API_SECRET  = API_KEY_RAW.includes(':') ? API_KEY_RAW.split(':').slice(1).join(':') : API_KEY_RAW;
 
 const PROCESSED_DIR = path.join(__dirname, '..', 'data', 'processed');
 const CAMPAIGN_DIR  = path.join(__dirname, '..', 'state', 'campaigns');
 
-// ── CID 포함 링크 생성 ────────────────────────────────────────────────────────
-function buildPartnerUrl(agodaHotelId, tag = '') {
-  const utmTag = tag || `hotel-${agodaHotelId}`;
-  return `https://www.agoda.com/hotel/${agodaHotelId}?cid=${CID}&tag=${utmTag}`;
-}
-
-function buildCitySearchUrl(cityId) {
-  return `https://www.agoda.com/search?cityId=${cityId}&cid=${CID}`;
-}
-
-function buildKeywordSearchUrl(keyword) {
-  return `https://www.agoda.com/search?searchText=${encodeURIComponent(keyword)}&cid=${CID}`;
-}
+const {
+  buildPartnerUrl,
+  buildCitySearchUrl,
+  buildKeywordSearchUrl,
+  getCID,
+} = require('../lib/agoda-link-builder');
 
 // ── 로컬 데이터 검색 ─────────────────────────────────────────────────────────
 function loadAllHotels() {
@@ -109,7 +101,7 @@ function searchLocal({ city, keyword, hotelId, all }) {
     coverage_score: h.coverage_score,
     agoda_hotel_id: h.agoda_hotel_id || '',
     // 기존 partner_url이 있으면 사용, 없으면 agoda_hotel_id로 생성
-    partner_url: h.partner_url && h.partner_url.includes(`cid=${CID}`)
+    partner_url: h.partner_url && h.partner_url.includes('cid=')
       ? h.partner_url
       : h.agoda_hotel_id
         ? buildPartnerUrl(h.agoda_hotel_id, h.utm_campaign || h.hotel_id)
@@ -205,7 +197,7 @@ async function main() {
   const query = { city: args.city, hotelId: args['hotel-id'], keyword: args.keyword, all: args.all };
 
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log(` 아고다 검색  CID: ${CID}  모드: ${isApi ? 'Content API' : '로컬 데이터'}`);
+  console.log(` 아고다 검색  CID: ${getCID()}  모드: ${isApi ? 'Content API' : '로컬 데이터'}`);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
   let hotels, error;
@@ -224,8 +216,7 @@ async function main() {
 
   // 딥링크 URL 출력
   if (query.city) {
-    const cityId = CITY_ID_MAP[(query.city || '').toLowerCase()];
-    const searchLink = cityId ? buildCitySearchUrl(cityId) : buildKeywordSearchUrl(query.city);
+    const { url: searchLink } = buildCitySearchUrl(query.city);
     console.log(`\n  📍 ${query.city} 전체 검색 링크 (CID 포함):`);
     console.log(`     ${searchLink}`);
   }
